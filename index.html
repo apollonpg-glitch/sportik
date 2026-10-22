@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Спортік — трекер тренувань</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header id="top">
+  <h1 id="title">Спортік</h1>
+  <div id="sessionClock" hidden></div>
+</header>
+<main id="view"></main>
+<div id="rest" hidden>
+  <div class="rest-name" id="restName"></div>
+  <div class="rest-time" id="restTime">0:00</div>
+  <div class="rest-btns">
+    <button data-act="restAdd" data-v="-15">−15с</button>
+    <button data-act="restAdd" data-v="15">+15с</button>
+    <button data-act="restSkip" class="primary">Пропустити</button>
+  </div>
+</div>
+<nav id="tabs">
+  <button data-tab="workout">🏋️<span>Тренування</span></button>
+  <button data-tab="history">📅<span>Історія</span></button>
+  <button data-tab="progress">📈<span>Прогрес</span></button>
+  <button data-tab="program">⚙️<span>Програма</span></button>
+</nav>
+<input type="file" id="importFile" accept="application/json,.json" hidden>
+<script src="app.js"></script>
+</body>
+</html>

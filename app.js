@@ -1,0 +1,408 @@
+/* Спортік — трекер тренувань. Vanilla JS, дані в localStorage. */
+'use strict';
+const KEY = 'sportik.v1';
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) ? n : null; };
+const fmtDur = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+const fmtDate = t => new Date(t).toLocaleDateString('uk-UA', {day: '2-digit', month: '2-digit', year: '2-digit'});
+const fmtDateLong = t => new Date(t).toLocaleDateString('uk-UA', {weekday: 'short', day: 'numeric', month: 'long'});
+
+// Типи вправ: підписи двох полів підходу. Об'єм рахується лише для 'reps'.
+const TYPES = {
+  reps: {name: 'кг × повт', a: 'кг', b: 'повт'},
+  time: {name: 'Час, с', a: 'кг', b: 'сек'},
+  dist: {name: 'Дист., м', a: 'кг', b: 'м'},
+  min:  {name: 'Хвилини', a: 'хв', b: 'пульс'},
+};
+
+const E = (name, sets, reps, rest, type = 'reps') => ({id: uid(), name, sets, reps, rest, type});
+function defaultProgram() {
+  return [
+    {id: 'd1', wd: 1, short: 'Пн', name: 'Верх тіла, сила', cardio: '35 хв зона 2, доріжка під нахилом 6–10%', exercises: [
+      E('Жим штанги лежачи', 4, '5–6', 150), E('Тяга штанги в нахилі', 4, '6–8', 120),
+      E('Жим гантелей сидячи над головою', 3, '8', 90), E('Підтягування', 4, '6–8', 120),
+      E('Віджимання на брусах', 3, '8–10', 90), E('Тяга канату до обличчя в кросовері', 3, '15', 60)]},
+    {id: 'd2', wd: 2, short: 'Вт', name: 'Низ тіла, сила', cardio: '25 хв легко на велотренажері', exercises: [
+      E('Станова тяга', 4, '5', 180), E('Жим ногами', 4, '8–10', 120),
+      E('Болгарські випади з гантелями', 3, '8/нога', 90), E('Гіперекстензія з вагою', 3, '12', 60),
+      E('Підйоми на носки в тренажері жиму ногами', 4, '15', 60), E('Планка', 3, '45–60', 45, 'time')]},
+    {id: 'd3', wd: 3, short: 'Ср', name: 'Витривалість, кор', cardio: '', exercises: [
+      E('Кардіо зона 2', 1, '60', 0, 'min'), E('Підйоми ніг у висі', 3, '10–12', 60),
+      E('Скручування на колінах у кросовері', 3, '15', 60), E('Прогулянка фермера', 4, '40', 60, 'dist'),
+      E('Бічна планка', 3, '30–45', 30, 'time'), E('Мобільність', 1, '15', 0, 'min')]},
+    {id: 'd4', wd: 4, short: 'Чт', name: "Верх тіла, об'єм", cardio: 'Інтервали 4×4', exercises: [
+      E('Жим гантелей на похилій лавці', 4, '8–10', 90), E('Тяга верхнього блоку', 4, '10–12', 90),
+      E('Тяга однією рукою в тренажері', 3, '10/рука', 60), E('Жим у тренажері для грудей, нейтральний хват', 3, '10–12', 60),
+      E('Жим у тренажері для плечей', 3, '10–12', 60), E('Махи гантелями в сторони', 4, '12–15', 45),
+      E('Суперсет: біцепс гантелі + трицепс на блоці', 3, '12+12', 60)]},
+    {id: 'd5', wd: 5, short: 'Пт', name: "Низ тіла, об'єм", cardio: 'Кругове 20 хв (40/20)', exercises: [
+      E('Румунська тяга', 4, '8', 120), E('Гоблет-присідання', 4, '10–12', 90),
+      E('Жим ногами вузько', 3, '12–15', 90), E('Ягідний міст зі штангою', 3, '10–12', 90),
+      E('Розведення ніг', 3, '15', 45), E('Зведення ніг', 3, '15', 45)]},
+  ];
+}
+
+// ---------- стан ----------
+let S;
+function load() {
+  try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
+  if (!S || !Array.isArray(S.program)) S = {program: defaultProgram(), sessions: [], active: null, rest: null};
+  S.sessions ||= []; S.active ??= null; S.rest ??= null;
+}
+function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
+load();
+
+let ui = {tab: 'workout', day: null, view: null, progEx: null, editDay: null};
+
+// ---------- допоміжне ----------
+const sameEx = (a, b) => (a.exId && b.id && a.exId === b.id) || (a.name || '').trim().toLowerCase() === (b.name || '').trim().toLowerCase();
+function lastFor(ex, excludeId) {
+  for (let i = S.sessions.length - 1; i >= 0; i--) {
+    const s = S.sessions[i]; if (s.id === excludeId) continue;
+    const e = s.exercises.find(x => sameEx(x, ex) && x.sets.some(t => t.done));
+    if (e) return {date: s.start, sets: e.sets.filter(t => t.done)};
+  }
+  return null;
+}
+const firstNum = t => { const m = String(t).match(/\d+([.,]\d+)?/); return m ? num(m[0]) : null; };
+function sessionVolume(s) {
+  let v = 0;
+  for (const e of s.exercises) if ((e.type || 'reps') === 'reps')
+    for (const t of e.sets) if (t.done && t.w && t.r) v += t.w * t.r;
+  return Math.round(v);
+}
+const e1rm = (w, r) => r <= 1 ? w : w * (1 + r / 30);
+const todayDay = () => { const wd = new Date().getDay(); return (S.program.find(d => d.wd === wd) || S.program[0] || {}).id; };
+const dayById = id => S.program.find(d => d.id === id);
+function setStr(t, type) { const T = TYPES[type || 'reps']; return type === 'min' ? `${t.w ?? '–'} хв${t.r ? ' @' + t.r : ''}` : (t.w ? t.w + '×' : '') + (t.r ?? '–') + (type === 'reps' ? '' : ' ' + T.b); }
+
+// ---------- звук / вібрація / wake lock ----------
+let actx;
+function unlockAudio() { try { actx ||= new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) {} }
+function beep() {
+  try { unlockAudio(); if (!actx) return; const t0 = actx.currentTime;
+    [0, .25, .5].forEach((d, i) => { const o = actx.createOscillator(), g = actx.createGain();
+      o.frequency.value = i === 2 ? 1320 : 880; o.connect(g); g.connect(actx.destination);
+      g.gain.setValueAtTime(.0001, t0 + d); g.gain.exponentialRampToValueAtTime(.4, t0 + d + .02);
+      g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .2); o.start(t0 + d); o.stop(t0 + d + .22); });
+  } catch (e) {}
+}
+let wakeLock = null;
+async function lockWake() {
+  if (!S.active || !('wakeLock' in navigator) || wakeLock) return;
+  try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } catch (e) {}
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+
+// ---------- таймер відпочинку (на мітках часу, не на тіках) ----------
+let restAlerted = false;
+function startRest(sec, name) {
+  if (!sec) return;
+  S.rest = {endAt: Date.now() + sec * 1000, name}; restAlerted = false; save(); tick();
+}
+function tick() {
+  const box = $('#rest');
+  if (S.rest) {
+    const left = (S.rest.endAt - Date.now()) / 1000;
+    box.hidden = false; $('#restName').textContent = 'Відпочинок · ' + S.rest.name;
+    $('#restTime').textContent = left > 0 ? fmtDur(Math.ceil(left)) : 'Час!';
+    box.classList.toggle('over', left <= 0);
+    if (left <= 0 && !restAlerted) {
+      restAlerted = true;
+      if (left > -5) { navigator.vibrate?.([300, 150, 300, 150, 500]); beep(); }
+      setTimeout(() => { if (S.rest && S.rest.endAt <= Date.now()) { S.rest = null; save(); tick(); } }, 4000);
+    }
+  } else box.hidden = true;
+  const c = $('#sessionClock');
+  if (S.active) { c.hidden = false; c.textContent = '⏱ ' + fmtDur((Date.now() - S.active.start) / 1000); } else c.hidden = true;
+}
+setInterval(tick, 250);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); lockWake(); } });
+
+// ---------- сесія ----------
+function newSession(day) {
+  return {id: uid(), dayId: day.id, dayName: `${day.short} · ${day.name}`, start: Date.now(), end: null,
+    cardioTarget: day.cardio || '', cardio: {min: '', hr: '', note: ''},
+    exercises: day.exercises.map(ex => {
+      const last = lastFor(ex);
+      const sets = Array.from({length: ex.sets || 1}, (_, i) => {
+        const p = last && (last.sets[i] || last.sets[last.sets.length - 1]);
+        return {w: p ? p.w : null, r: p ? p.r : null, done: false};
+      });
+      return {exId: ex.id, name: ex.name, type: ex.type || 'reps', target: `${ex.sets}×${ex.reps}`, targetReps: ex.reps, rest: ex.rest, notes: '', sets};
+    })};
+}
+function finishSession() {
+  const s = S.active; if (!s) return;
+  s.end = Date.now(); s.duration = Math.round((s.end - s.start) / 1000);
+  s.exercises.forEach(e => e.sets = e.sets.filter(t => t.done || t.w != null || t.r != null));
+  s.volume = sessionVolume(s);
+  S.sessions.push(s); S.active = null; S.rest = null; save(); releaseWake();
+  ui.tab = 'history'; ui.view = s.id; render();
+}
+
+function exCard(e, ei, s, live) {
+  const T = TYPES[e.type] || TYPES.reps;
+  const last = lastFor(e, s.id);
+  const hint = last ? `Минулого разу (${fmtDate(last.date)}): ${last.sets.map(t => setStr(t, e.type)).join(', ')}` : 'Ще немає історії';
+  const tn = firstNum(e.targetReps) ?? '', isMin = e.type === 'min';
+  const phA = isMin ? tn : T.a, phB = isMin ? T.b : tn;
+  return `<div class="card" data-ei="${ei}">
+    <div class="row between"><h3>${esc(e.name)}</h3><span class="tgt">${esc(e.target || '')}${e.rest ? ' · ' + e.rest + 'с' : ''}</span></div>
+    <div class="hint">${esc(hint)}</div>
+    <div class="lbls"><span>#</span><span>${T.a}</span><span>${T.b}</span><span></span></div>
+    ${e.sets.map((t, si) => `<div class="set ${t.done ? 'done' : ''}" data-si="${si}">
+      <span class="n">${si + 1}</span>
+      <input type="number" inputmode="decimal" step="any" data-f="w" value="${t.w ?? ''}" placeholder="${phA}">
+      <input type="number" inputmode="decimal" step="any" data-f="r" value="${t.r ?? ''}" placeholder="${phB}">
+      <button class="chk" data-act="done" aria-label="Підхід виконано">✓</button></div>`).join('')}
+    <div class="row"><button data-act="addSet">+ підхід</button><button data-act="delSet" ${e.sets.length ? '' : 'disabled'}>− підхід</button>
+      <button class="danger" data-act="delEx">Видалити вправу</button></div>
+    <textarea data-f="notes" placeholder="Нотатки до вправи">${esc(e.notes)}</textarea></div>`;
+}
+function cardioCard(s) {
+  return `<div class="card"><h3>Кардіо</h3>${s.cardioTarget ? `<div class="tgt">Ціль: ${esc(s.cardioTarget)}</div>` : ''}
+    <div class="row" style="flex-wrap:nowrap;margin-top:6px">
+      <input type="number" inputmode="decimal" data-c="min" value="${s.cardio.min ?? ''}" placeholder="хвилин">
+      <input type="number" inputmode="numeric" data-c="hr" value="${s.cardio.hr ?? ''}" placeholder="сер. пульс"></div>
+    <input data-c="note" value="${esc(s.cardio.note)}" placeholder="Що робили (доріжка, вело…)" style="margin-top:6px"></div>`;
+}
+function sessionEditor(s, live) {
+  return s.exercises.map((e, i) => exCard(e, i, s, live)).join('') +
+    `<div class="card"><div class="row" style="flex-wrap:nowrap"><input id="newExName" placeholder="Додати вправу в це тренування"><button data-act="addEx">+</button></div></div>` +
+    cardioCard(s);
+}
+
+// ---------- екрани ----------
+function vWorkout() {
+  const s = S.active;
+  if (s) {
+    return `<div class="row between"><h2>${esc(s.dayName)}</h2><span class="mut">${fmtDateLong(s.start)}</span></div>
+      <div id="sess">${sessionEditor(s, true)}</div>
+      <button class="primary big" data-act="finish">Завершити тренування</button>
+      <div style="height:8px"></div><button class="big danger" data-act="cancel">Скасувати без збереження</button>`;
+  }
+  ui.day ||= todayDay();
+  const d = dayById(ui.day) || S.program[0];
+  if (!d) return '<p>Програма порожня. Додайте день у розділі «Програма».</p>';
+  return `<div class="days">${S.program.map(x => `<button class="${x.id === d.id ? 'on' : ''}" data-act="pickDay" data-id="${x.id}">${esc(x.short)}</button>`).join('')}</div>
+    <h2>${esc(d.short)} · ${esc(d.name)}</h2>
+    <div class="card">${d.exercises.map(ex => { const l = lastFor(ex);
+      return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line)"><span>${esc(ex.name)}</span><span class="tgt">${ex.sets}×${esc(ex.reps)}${l ? ' · ' + esc(setStr(l.sets[0], ex.type)) : ''}</span></div>`; }).join('')}
+      ${d.cardio ? `<div class="tgt" style="margin-top:8px">Кардіо: ${esc(d.cardio)}</div>` : ''}</div>
+    <button class="primary big" data-act="start">▶ Почати тренування</button>`;
+}
+function vHistory() {
+  if (ui.view) {
+    const s = S.sessions.find(x => x.id === ui.view);
+    if (s) return `<button data-act="back">← Назад</button>
+      <h2>${esc(s.dayName)}</h2><div class="mut">${fmtDateLong(s.start)} · ${fmtDur(s.duration || 0)} · ${(sessionVolume(s) / 1000).toFixed(2)} т</div>
+      <div class="card row" style="margin-top:8px;flex-wrap:nowrap"><label class="mut small" style="white-space:nowrap">Тривалість, хв</label>
+        <input type="number" data-act-input="dur" value="${Math.round((s.duration || 0) / 60)}"></div>
+      <div id="sess">${sessionEditor(s, false)}</div>
+      <button class="big danger" data-act="delSession">Видалити тренування</button>`;
+    ui.view = null;
+  }
+  if (!S.sessions.length) return '<h2>Історія</h2><p class="mut">Тут з’являться завершені тренування.</p>';
+  return '<h2>Історія</h2>' + S.sessions.slice().reverse().map(s => {
+    const sets = s.exercises.reduce((a, e) => a + e.sets.filter(t => t.done).length, 0);
+    return `<button class="list-item" data-act="open" data-id="${s.id}"><div class="row between"><b>${esc(s.dayName)}</b><span class="mut">${fmtDate(s.start)}</span></div>
+      <div class="mut">${fmtDur(s.duration || 0)} · ${sets} підх. · ${(sessionVolume(s) / 1000).toFixed(2)} т${s.cardio && s.cardio.min ? ' · кардіо ' + s.cardio.min + ' хв' : ''}</div></button>`;
+  }).join('');
+}
+
+function exerciseSeries(name) {
+  const pts = [];
+  for (const s of S.sessions) for (const e of s.exercises) {
+    if (e.name.trim().toLowerCase() !== name) continue;
+    let best = null, rm = null;
+    for (const t of e.sets) if (t.done && t.w != null) {
+      if (best == null || t.w > best.w) best = t;
+      if (t.r) { const v = e1rm(t.w, t.r); if (rm == null || v > rm) rm = v; }
+    }
+    if (best) pts.push({t: s.start, w: best.w, r: best.r, rm: rm != null ? Math.round(rm * 10) / 10 : null, type: e.type});
+  }
+  return pts;
+}
+function lineChart(pts) {
+  const W = 340, H = 180, P = 28;
+  const vals = pts.flatMap(p => [p.w, p.rm]).filter(v => v != null);
+  let lo = Math.min(...vals), hi = Math.max(...vals); if (lo === hi) { lo -= 5; hi += 5; }
+  const x = i => P + (pts.length === 1 ? (W - 2 * P) / 2 : i * (W - P - 10) / (pts.length - 1));
+  const y = v => H - 20 - (v - lo) / (hi - lo) * (H - 40);
+  const line = (k, c) => { const p = pts.map((q, i) => q[k] != null ? [x(i), y(q[k])] : null).filter(Boolean);
+    return `<polyline fill="none" stroke="${c}" stroke-width="2.5" points="${p.map(a => a.join(',')).join(' ')}"/>` + p.map(a => `<circle cx="${a[0]}" cy="${a[1]}" r="3.5" fill="${c}"/>`).join(''); };
+  const grid = [lo, (lo + hi) / 2, hi].map(v => `<line x1="${P}" x2="${W - 6}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" opacity=".12"/><text x="2" y="${y(v) + 3}">${Math.round(v)}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Графік прогресу">${grid}${line('rm', 'var(--acc2)')}${line('w', 'var(--acc)')}
+    <text x="${P}" y="${H - 4}">${fmtDate(pts[0].t)}</text><text x="${W - 6}" y="${H - 4}" text-anchor="end">${fmtDate(pts[pts.length - 1].t)}</text></svg>`;
+}
+function weekStart(t) { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); }
+function weeklyChart() {
+  const now = weekStart(Date.now()), weeks = [];
+  for (let i = 7; i >= 0; i--) { const d = new Date(now); d.setDate(d.getDate() - 7 * i); weeks.push({t: d.getTime(), v: 0, n: 0, c: 0}); }
+  for (const s of S.sessions) { const w = weeks.find(k => k.t === weekStart(s.start)); if (w) { w.v += sessionVolume(s); w.n++; w.c += num(s.cardio?.min) || 0; } }
+  const W = 340, H = 150, max = Math.max(1, ...weeks.map(w => w.v)), bw = (W - 10) / 8;
+  const bars = weeks.map((w, i) => { const h = w.v / max * (H - 40);
+    return `<rect x="${5 + i * bw + 4}" y="${H - 20 - h}" width="${bw - 8}" height="${h}" rx="4" fill="var(--acc)"/>
+      <text x="${5 + i * bw + bw / 2}" y="${H - 24 - h}" text-anchor="middle">${w.v ? (w.v / 1000).toFixed(1) : ''}</text>
+      <text x="${5 + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">${new Date(w.t).toLocaleDateString('uk-UA', {day: '2-digit', month: '2-digit'})}</text>`; }).join('');
+  const cur = weeks[7];
+  return `<div class="card"><h3>Об'єм по тижнях (тонни)</h3><svg viewBox="0 0 ${W} ${H}">${bars}</svg>
+    <div class="stats" style="margin-top:6px"><div><b>${cur.n}</b><span class="mut small">тренувань цього тижня</span></div>
+    <div><b>${(cur.v / 1000).toFixed(1)} т</b><span class="mut small">об'єм</span></div><div><b>${Math.round(cur.c)}</b><span class="mut small">хв кардіо</span></div></div></div>`;
+}
+function vProgress() {
+  const names = [...new Set(S.sessions.flatMap(s => s.exercises.filter(e => e.sets.some(t => t.done && t.w != null)).map(e => e.name.trim())))];
+  let html = '<h2>Прогрес</h2>' + weeklyChart();
+  if (!names.length) return html + '<p class="mut">Завершіть кілька тренувань, щоб побачити графіки по вправах.</p>';
+  if (!ui.progEx || !names.some(n => n.toLowerCase() === ui.progEx)) ui.progEx = names[0].toLowerCase();
+  const pts = exerciseSeries(ui.progEx), type = pts[0]?.type || 'reps';
+  html += `<div class="card"><select data-act-input="progEx">${names.map(n => `<option value="${esc(n.toLowerCase())}" ${n.toLowerCase() === ui.progEx ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>`;
+  if (pts.length) {
+    const bw = pts.reduce((a, p) => p.w > a.w ? p : a), br = pts.filter(p => p.rm != null).reduce((a, p) => !a || p.rm > a.rm ? p : a, null);
+    html += `<div class="legend" style="margin:8px 0"><span><i style="background:var(--acc)"></i>Найкращий підхід, ${TYPES[type].a}</span>${type === 'reps' ? '<span><i style="background:var(--acc2)"></i>Оцінка 1ПМ (Еплі)</span>' : ''}</div>
+      ${lineChart(type === 'reps' ? pts : pts.map(p => ({...p, rm: null})))}
+      <h3 style="margin-top:10px">Рекорди</h3><table>
+      <tr><td>Макс. вага</td><td><b>${bw.w} ${TYPES[type].a}</b> × ${bw.r ?? '–'}</td><td class="mut">${fmtDate(bw.t)}</td></tr>
+      ${br && type === 'reps' ? `<tr><td>Оцінка 1ПМ</td><td><b>${br.rm} кг</b></td><td class="mut">${fmtDate(br.t)}</td></tr>` : ''}
+      <tr><td>Тренувань</td><td><b>${pts.length}</b></td><td></td></tr></table>`;
+  }
+  return html + '</div>' + vRecords();
+}
+function vRecords() {
+  const rows = [];
+  for (const s of S.sessions) for (const e of s.exercises) if ((e.type || 'reps') === 'reps') for (const t of e.sets) if (t.done && t.w && t.r) {
+    const k = e.name.trim().toLowerCase(), v = e1rm(t.w, t.r), r = rows.find(x => x.k === k);
+    if (!r) rows.push({k, n: e.name, v, t, d: s.start}); else if (v > r.v) Object.assign(r, {v, t, d: s.start});
+  }
+  if (!rows.length) return '';
+  return `<div class="card"><h3>Особисті рекорди (за 1ПМ)</h3><table><tr><th>Вправа</th><th>Підхід</th><th>1ПМ</th></tr>
+    ${rows.map(r => `<tr><td>${esc(r.n)}</td><td>${r.t.w}×${r.t.r}</td><td><b>${Math.round(r.v)}</b></td></tr>`).join('')}</table></div>`;
+}
+function vProgram() {
+  ui.editDay ||= S.program[0]?.id;
+  const d = dayById(ui.editDay);
+  let h = `<h2>Програма</h2><div class="days">${S.program.map(x => `<button class="${d && x.id === d.id ? 'on' : ''}" data-act="editDay" data-id="${x.id}">${esc(x.short)}</button>`).join('')}<button data-act="addDay">+ день</button></div>`;
+  if (d) h += `<div class="card" data-day="${d.id}">
+    <div class="pe" style="border:0;margin:0;padding:0"><div class="g" style="grid-template-columns:70px 1fr 90px">
+      <div><label>Коротко</label><input data-d="short" value="${esc(d.short)}"></div>
+      <div><label>Назва дня</label><input data-d="name" value="${esc(d.name)}"></div>
+      <div><label>День тижня</label><select data-d="wd">${['—', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'].map((n, i) => `<option value="${i === 7 ? 0 : i === 0 ? -1 : i}" ${d.wd === (i === 7 ? 0 : i === 0 ? -1 : i) ? 'selected' : ''}>${n}</option>`).join('')}</select></div></div>
+      <div><label>Кардіо (ціль)</label><input data-d="cardio" value="${esc(d.cardio)}"></div></div>
+    ${d.exercises.map((ex, i) => `<div class="pe" data-xi="${i}">
+      <div class="row" style="flex-wrap:nowrap"><input data-x="name" value="${esc(ex.name)}">
+        <button class="icon" data-act="exUp" aria-label="Вгору">↑</button><button class="icon danger" data-act="exDel" aria-label="Видалити">✕</button></div>
+      <div class="g" style="grid-template-columns:1fr 1fr 1fr 1.4fr"><div><label>Підходи</label><input type="number" data-x="sets" value="${ex.sets}"></div>
+        <div><label>Повтори</label><input data-x="reps" value="${esc(ex.reps)}"></div>
+        <div><label>Відпоч., с</label><input type="number" data-x="rest" value="${ex.rest}"></div>
+        <div><label>Тип</label><select data-x="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${ex.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div></div></div>`).join('')}
+    <div class="row" style="margin-top:10px"><button data-act="exAdd">+ вправа</button><button class="danger" data-act="dayDel">Видалити день</button></div></div>`;
+  return h + `<h2>Резервна копія</h2><div class="card"><div class="row"><button data-act="export">⬇ Експорт JSON</button><button data-act="import">⬆ Імпорт JSON</button></div>
+    <p class="mut small">Дані зберігаються лише в цьому браузері. Робіть експорт час від часу.</p>
+    <button class="danger" data-act="resetProg">Відновити стандартну програму</button></div>`;
+}
+
+function render() {
+  const y = scrollY;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab));
+  $('#view').innerHTML = ({workout: vWorkout, history: vHistory, progress: vProgress, program: vProgram})[ui.tab]();
+  scrollTo(0, ui.keepScroll ? y : 0); ui.keepScroll = false;
+  tick();
+}
+const rerender = () => { ui.keepScroll = true; render(); };
+const curSession = () => ui.tab === 'workout' ? S.active : S.sessions.find(x => x.id === ui.view);
+
+// ---------- події ----------
+document.addEventListener('click', ev => {
+  const tab = ev.target.closest('[data-tab]');
+  if (tab) { ui.tab = tab.dataset.tab; ui.view = null; render(); return; }
+  const b = ev.target.closest('[data-act]'); if (!b || b.tagName === 'SELECT' || b.tagName === 'INPUT') return;
+  const act = b.dataset.act, card = b.closest('[data-ei]'), s = curSession();
+  const e = card && s ? s.exercises[+card.dataset.ei] : null;
+  const A = {
+    pickDay() { ui.day = b.dataset.id; render(); },
+    start() { const d = dayById(ui.day); if (!d) return; unlockAudio(); S.active = newSession(d); save(); lockWake(); render(); },
+    done() {
+      unlockAudio();
+      const row = b.closest('[data-si]'), t = e.sets[+row.dataset.si];
+      if (!t.done) {
+        if (e.type === 'min') { if (t.w == null) t.w = firstNum(e.targetReps); }
+        else if (t.r == null) t.r = firstNum(e.targetReps);
+        t.done = true; save();
+        if (ui.tab === 'workout') startRest(e.rest, e.name);
+      } else { t.done = false; save(); }
+      rerender();
+    },
+    addSet() { const p = e.sets[e.sets.length - 1]; e.sets.push({w: p ? p.w : null, r: p ? p.r : null, done: false}); save(); rerender(); },
+    delSet() { e.sets.pop(); save(); rerender(); },
+    delEx() { if (confirm('Видалити вправу з цього тренування?')) { s.exercises.splice(+card.dataset.ei, 1); save(); rerender(); } },
+    addEx() { const n = $('#newExName').value.trim(); if (!n) return;
+      s.exercises.push({exId: null, name: n, type: 'reps', target: '', targetReps: '', rest: 90, notes: '', sets: [{w: null, r: null, done: false}]}); save(); rerender(); },
+    finish() {
+      const n = S.active.exercises.reduce((a, x) => a + x.sets.filter(t => t.done).length, 0);
+      if (!n && !S.active.cardio.min && !confirm('Жодного виконаного підходу. Все одно завершити?')) return;
+      finishSession();
+    },
+    cancel() { if (confirm('Скасувати тренування? Дані цієї сесії буде втрачено.')) { S.active = null; S.rest = null; save(); releaseWake(); render(); } },
+    restAdd() { if (S.rest) { S.rest.endAt = Math.max(Date.now(), S.rest.endAt) + (+b.dataset.v) * 1000; restAlerted = false; save(); tick(); } },
+    restSkip() { S.rest = null; save(); tick(); },
+    open() { ui.view = b.dataset.id; render(); },
+    back() { ui.view = null; render(); },
+    delSession() { if (confirm('Видалити це тренування назавжди?')) { S.sessions = S.sessions.filter(x => x.id !== ui.view); ui.view = null; save(); render(); } },
+    editDay() { ui.editDay = b.dataset.id; render(); },
+    addDay() { const d = {id: uid(), wd: -1, short: 'Д' + (S.program.length + 1), name: 'Новий день', cardio: '', exercises: []}; S.program.push(d); ui.editDay = d.id; save(); render(); },
+    dayDel() { if (confirm('Видалити цей день з програми? Історія залишиться.')) { S.program = S.program.filter(x => x.id !== ui.editDay); ui.editDay = null; ui.day = null; save(); render(); } },
+    exAdd() { dayById(ui.editDay).exercises.push(E('Нова вправа', 3, '10', 60)); save(); rerender(); },
+    exDel() { const d = dayById(ui.editDay), i = +b.closest('[data-xi]').dataset.xi; if (confirm(`Видалити «${d.exercises[i].name}»?`)) { d.exercises.splice(i, 1); save(); rerender(); } },
+    exUp() { const d = dayById(ui.editDay), i = +b.closest('[data-xi]').dataset.xi; if (i > 0) { [d.exercises[i - 1], d.exercises[i]] = [d.exercises[i], d.exercises[i - 1]]; save(); rerender(); } },
+    export() {
+      const blob = new Blob([JSON.stringify({app: 'sportik', version: 1, exported: new Date().toISOString(), program: S.program, sessions: S.sessions}, null, 1)], {type: 'application/json'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `sportik-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    },
+    import() { $('#importFile').click(); },
+    resetProg() { if (confirm('Замінити програму на стандартну? Історія залишиться.')) { S.program = defaultProgram(); ui.editDay = null; ui.day = null; save(); render(); } },
+  };
+  A[act]?.();
+});
+
+// Введення значень: зберігаємо без перерендеру, щоб не збивати фокус.
+document.addEventListener('input', ev => {
+  const el = ev.target, s = curSession();
+  if (el.dataset.f && s) {
+    const e = s.exercises[+el.closest('[data-ei]').dataset.ei];
+    if (el.dataset.f === 'notes') e.notes = el.value;
+    else { e.sets[+el.closest('[data-si]').dataset.si][el.dataset.f] = el.value === '' ? null : num(el.value); }
+  } else if (el.dataset.c && s) {
+    s.cardio[el.dataset.c] = el.dataset.c === 'note' ? el.value : (el.value === '' ? '' : num(el.value));
+  } else if (el.dataset.actInput === 'dur' && s) {
+    s.duration = (num(el.value) || 0) * 60;
+  } else if (el.dataset.d) {
+    const d = dayById(ui.editDay); d[el.dataset.d] = el.dataset.d === 'wd' ? +el.value : el.value;
+    if (el.dataset.d === 'short') document.querySelector(`.days [data-id="${d.id}"]`).textContent = el.value;
+  } else if (el.dataset.x) {
+    const ex = dayById(ui.editDay).exercises[+el.closest('[data-xi]').dataset.xi], k = el.dataset.x;
+    ex[k] = (k === 'sets' || k === 'rest') ? Math.max(0, Math.round(num(el.value) || 0)) : el.value;
+  } else if (el.dataset.actInput === 'progEx') { ui.progEx = el.value; rerender(); return; }
+  else return;
+  if (s && s.end) s.volume = sessionVolume(s);
+  save();
+});
+
+$('#importFile').addEventListener('change', async ev => {
+  const f = ev.target.files[0]; if (!f) return;
+  try {
+    const d = JSON.parse(await f.text());
+    if (!Array.isArray(d.program) || !Array.isArray(d.sessions)) throw new Error('format');
+    if (!confirm(`Імпортувати ${d.sessions.length} тренувань і програму з ${d.program.length} днів? Поточні дані буде замінено.`)) return;
+    S.program = d.program; S.sessions = d.sessions.sort((a, b) => a.start - b.start); save(); ui = {tab: 'history'}; render();
+    alert('Імпорт виконано');
+  } catch (e) { alert('Не вдалося прочитати файл: це не резервна копія Спортіка.'); }
+  ev.target.value = '';
+});
+
+render(); lockWake();
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('service-worker.js').catch(() => {});
