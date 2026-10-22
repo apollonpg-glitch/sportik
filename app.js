@@ -137,6 +137,96 @@ function tick() {
 setInterval(tick, 250);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); lockWake(); } });
 
+// ---------- Fitbit / Google Health (вхід через Google у браузері, без секрету) ----------
+const GH_CLIENT_ID = '1011377398999-6nn1j2r0clqsijevqrbkdngi2mv821mq.apps.googleusercontent.com';
+const GH_SCOPE = 'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly';
+const TOK_KEY = 'sportik.ghTok', OK_KEY = 'sportik.ghOk';
+let gisP = null, tokClient = null, tokWaiter = null, fbBusy = false;
+function loadGis() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  return gisP ||= new Promise((res, rej) => {
+    const sc = document.createElement('script'); sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true;
+    sc.onload = () => res(); sc.onerror = () => { gisP = null; sc.remove(); rej(new Fitbit.FitbitError('gis')); };
+    document.head.appendChild(sc);
+  });
+}
+function savedToken() { try { const t = JSON.parse(sessionStorage.getItem(TOK_KEY)); if (t && t.exp > Date.now() + 60000) return t.tok; } catch (e) {} return null; }
+const dropToken = () => { try { sessionStorage.removeItem(TOK_KEY); } catch (e) {} };
+// Викликати синхронно з обробника натискання, інакше браузер може заблокувати вікно Google.
+function getToken() {
+  const t = savedToken(); if (t) return Promise.resolve(t);
+  return new Promise((res, rej) => {
+    const go = () => {
+      tokClient ||= google.accounts.oauth2.initTokenClient({client_id: GH_CLIENT_ID, scope: GH_SCOPE,
+        callback: r => { const w = tokWaiter; tokWaiter = null; if (!w) return;
+          if (r.error) return w.rej(new Fitbit.FitbitError(r.error === 'access_denied' ? 'denied' : 'auth', r.error));
+          if (google.accounts.oauth2.hasGrantedAllScopes && !google.accounts.oauth2.hasGrantedAllScopes(r, GH_SCOPE)) return w.rej(new Fitbit.FitbitError('denied'));
+          try { sessionStorage.setItem(TOK_KEY, JSON.stringify({tok: r.access_token, exp: Date.now() + (+r.expires_in || 3600) * 1000})); } catch (e) {}
+          localStorage.setItem(OK_KEY, '1'); w.res(r.access_token); },
+        error_callback: e => { const w = tokWaiter; tokWaiter = null;
+          w && w.rej(new Fitbit.FitbitError(e && e.type === 'popup_failed_to_open' ? 'popup' : e && e.type === 'popup_closed' ? 'closed' : 'auth')); }});
+      tokWaiter = {res, rej};
+      tokClient.requestAccessToken({prompt: localStorage.getItem(OK_KEY) ? '' : 'consent'});
+    };
+    if (window.google?.accounts?.oauth2) go(); else loadGis().then(go, rej);
+  });
+}
+const FB_ERR = {
+  popup: 'Браузер заблокував вікно входу Google. Натисни «Підтягнути з Fitbit» ще раз (або дозволь спливаючі вікна для цього сайту).',
+  closed: 'Вікно входу Google закрито. Натисни ще раз і увійди в акаунт, до якого підключений Fitbit.',
+  denied: 'Доступ не надано. Щоб підтягувати кардіо, дозволь Спортіку читати дані «Активність і фітнес» у Google.',
+  expired: 'Вхід у Google застарів. Натисни «Підтягнути з Fitbit» ще раз.',
+  none: 'Не знайшов тренувань Fitbit на час цього тренування (±1 год). Відкрий застосунок Fitbit, щоб браслет синхронізувався, зачекай хвилину й спробуй ще раз. На браслеті тренування треба запускати вручну («Силове тренування», «Бігова доріжка»).',
+  network: "Немає зв'язку з Google. Перевір інтернет і спробуй ще раз.",
+  gis: 'Не вдалося завантажити вхід Google. Перевір інтернет і спробуй ще раз.',
+  forbidden: 'Google відмовив у доступі (403). Перевір, що вхід виконано в той самий акаунт, де Fitbit, і що він доданий у тестувальники проєкту.',
+};
+let toastT;
+function toast(msg, bad) {
+  let el = $('#toast'); if (!el) { el = document.createElement('div'); el.id = 'toast'; el.setAttribute('role', 'status'); document.body.appendChild(el); }
+  el.textContent = msg; el.className = bad ? 'bad' : ''; el.hidden = false; clearTimeout(toastT);
+  toastT = setTimeout(() => el.hidden = true, bad ? 9000 : 5000);
+}
+const stripFb = n => String(n || '').replace(/\s*⌚ з Fitbit:[\s\S]*$/, '').trim();
+function applyFitbit(s, r) {
+  s.fitbit = {at: r.at, cardio: r.cardio || null, strength: r.strength || null};
+  if (r.cardio) {
+    s.cardio.min = r.cardio.min; s.cardio.hr = r.cardio.hr ?? '';
+    s.cardio.note = [stripFb(s.cardio.note), Fitbit.cardioNote(r.cardio)].filter(Boolean).join(' ');
+  }
+  if (s.end) s.volume = sessionVolume(s);
+  save();
+}
+function fbSummary(s) {
+  const p = []; const c = s.fitbit?.cardio, st = s.fitbit?.strength;
+  if (st) p.push(`силове ${st.min} хв${st.hr ? ' · пульс ' + st.hr : ''}`);
+  if (c) p.push(`кардіо ${c.min} хв`);
+  return p.length ? '⌚ ' + p.join(', ') : '';
+}
+function strengthLine(st) {
+  if (!st) return '';
+  const p = [st.min + ' хв']; if (st.hr) p.push('сер. пульс ' + st.hr); if (st.maxHr) p.push('макс. ' + st.maxHr);
+  if (st.kcal) p.push(st.kcal + ' ккал'); if (st.azm) p.push('АЗМ ' + st.azm);
+  return `<div class="fb">⌚ Силове з Fitbit: ${esc(p.join(' · '))}</div>`;
+}
+async function importFitbit(s, btn) {
+  if (fbBusy) return; fbBusy = true;
+  const tokP = getToken(); // синхронно в межах натискання
+  const st = btn.parentElement.querySelector('.fbst'); btn.disabled = true;
+  const say = m => { if (st) st.textContent = m; };
+  say('Вхід у Google…');
+  try {
+    let tok = await tokP; say('Завантажую тренування з Fitbit…');
+    const r = await Fitbit.importFor(tok, s.start, s.end || Date.now());
+    applyFitbit(s, r); rerender();
+    const msg = [r.cardio && `кардіо ${r.cardio.min} хв${r.cardio.hr ? ', пульс ' + r.cardio.hr : ''}`, r.strength && `силове ${r.strength.min} хв${r.strength.hr ? ', пульс ' + r.strength.hr : ''}`].filter(Boolean).join('; ');
+    toast('Підтягнуто з Fitbit: ' + msg + (r.cardio ? '' : '. Кардіо-тренування не знайдено.'));
+  } catch (e) {
+    if (e && e.code === 'expired') dropToken();
+    say(''); toast(FB_ERR[e && e.code] || 'Не вдалося отримати дані з Fitbit' + (e && e.message ? ` (${e.message})` : '') + '. Спробуй ще раз.', true);
+  } finally { fbBusy = false; btn.disabled = false; }
+}
+
 // ---------- сесія ----------
 function newSession(day) {
   return {id: uid(), dayId: day.id, dayName: `${day.short} · ${day.name}`, start: Date.now(), end: null,
@@ -179,11 +269,14 @@ function exCard(e, ei, s, live) {
     <textarea data-f="notes" placeholder="Нотатки до вправи">${esc(e.notes)}</textarea></div>`;
 }
 function cardioCard(s) {
-  return `<div class="card"><h3>Кардіо</h3>${s.cardioTarget ? `<div class="tgt">Ціль: ${esc(s.cardioTarget)}</div>` : ''}
+  const fc = s.fitbit?.cardio, fromFb = fc && +s.cardio.min === fc.min;
+  return `<div class="card"><div class="row between"><h3>Кардіо</h3>${fromFb ? '<span class="tag">з Fitbit</span>' : ''}</div>${s.cardioTarget ? `<div class="tgt">Ціль: ${esc(s.cardioTarget)}</div>` : ''}
     <div class="row" style="flex-wrap:nowrap;margin-top:6px">
       <input type="number" inputmode="decimal" data-c="min" value="${s.cardio.min ?? ''}" placeholder="хвилин">
       <input type="number" inputmode="numeric" data-c="hr" value="${s.cardio.hr ?? ''}" placeholder="сер. пульс"></div>
-    <input data-c="note" value="${esc(s.cardio.note)}" placeholder="Що робили (доріжка, вело…)" style="margin-top:6px"></div>`;
+    <input data-c="note" value="${esc(s.cardio.note)}" placeholder="Що робили (доріжка, вело…)" style="margin-top:6px">
+    ${strengthLine(s.fitbit?.strength)}
+    <div class="fbrow"><button data-act="fitbit">⌚ Підтягнути з Fitbit</button><span class="fbst mut small">${s.fitbit ? 'Оновлено ' + new Date(s.fitbit.at).toLocaleTimeString('uk-UA', {hour: '2-digit', minute: '2-digit'}) : ''}</span></div></div>`;
 }
 function sessionEditor(s, live) {
   return s.exercises.map((e, i) => exCard(e, i, s, live)).join('') +
@@ -225,7 +318,7 @@ function vHistory() {
   return '<h2>Історія</h2>' + S.sessions.slice().reverse().map(s => {
     const sets = s.exercises.reduce((a, e) => a + e.sets.filter(t => t.done).length, 0);
     return `<button class="list-item" data-act="open" data-id="${s.id}"><div class="row between"><b>${esc(s.dayName)}</b><span class="mut">${fmtDate(s.start)}</span></div>
-      <div class="mut">${fmtDur(s.duration || 0)} · ${sets} підх. · ${(sessionVolume(s) / 1000).toFixed(2)} т${s.cardio && s.cardio.min ? ' · кардіо ' + s.cardio.min + ' хв' : ''}</div></button>`;
+      <div class="mut">${fmtDur(s.duration || 0)} · ${sets} підх. · ${(sessionVolume(s) / 1000).toFixed(2)} т${s.cardio && s.cardio.min ? ' · кардіо ' + s.cardio.min + ' хв' : ''}</div>${fbSummary(s) ? `<div class="mut small">${esc(fbSummary(s))}</div>` : ''}</button>`;
   }).join('');
 }
 
@@ -326,6 +419,7 @@ function render() {
   $('#view').innerHTML = ({workout: vWorkout, history: vHistory, progress: vProgress, program: vProgram})[ui.tab]();
   scrollTo(0, ui.keepScroll ? y : 0); ui.keepScroll = false;
   tick();
+  if (document.querySelector('[data-act=fitbit]') && navigator.onLine !== false) loadGis().catch(() => {});
 }
 const rerender = () => { ui.keepScroll = true; render(); };
 const curSession = () => ui.tab === 'workout' ? S.active : S.sessions.find(x => x.id === ui.view);
@@ -380,6 +474,7 @@ document.addEventListener('click', ev => {
       document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     },
     import() { $('#importFile').click(); },
+    fitbit() { if (s) importFitbit(s, b); },
     resetProg() { if (confirm('Замінити програму на стандартну? Історія залишиться.')) { S.program = defaultProgram(); ui.editDay = null; ui.day = null; save(); render(); } },
   };
   A[act]?.();

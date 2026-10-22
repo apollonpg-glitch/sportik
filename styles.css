@@ -61,3 +61,8 @@ td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
 #awakeBtn{margin-left:auto;background:none;border:1px solid rgba(127,127,127,.35);border-radius:999px;font-size:18px;line-height:1;padding:6px 9px;opacity:.55}
 #awakeBtn.on{opacity:1;border-color:var(--acc)}
 #sessionClock+#awakeBtn{margin-left:10px}
+.tag{font-size:12px;background:var(--acc2);color:#fff;border-radius:999px;padding:2px 8px}
+.fb{font-size:13px;color:var(--acc2);margin-top:8px}
+.fbrow{display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap}
+#toast{pointer-events:none;position:fixed;left:12px;right:12px;top:calc(64px + env(safe-area-inset-top));z-index:9;background:var(--acc);color:#fff;border-radius:12px;padding:12px 14px;box-shadow:0 8px 30px rgba(0,0,0,.3);max-width:696px;margin:0 auto;font-size:15px}
+#toast.bad{background:var(--warn)}
