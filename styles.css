@@ -57,3 +57,7 @@ svg text{fill:var(--mut);font-size:10px}
 .pe label{font-size:12px;color:var(--mut)}
 table{width:100%;border-collapse:collapse;font-size:14px}
 td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
+
+#awakeBtn{margin-left:auto;background:none;border:1px solid rgba(127,127,127,.35);border-radius:999px;font-size:18px;line-height:1;padding:6px 9px;opacity:.55}
+#awakeBtn.on{opacity:1;border-color:var(--acc)}
+#sessionClock+#awakeBtn{margin-left:10px}

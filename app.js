@@ -90,12 +90,27 @@ function beep() {
       g.gain.exponentialRampToValueAtTime(.0001, t0 + d + .2); o.start(t0 + d); o.stop(t0 + d + .22); });
   } catch (e) {}
 }
-let wakeLock = null;
-async function lockWake() {
-  if (!S.active || !('wakeLock' in navigator) || wakeLock) return;
-  try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } catch (e) {}
+let wakeLock = null, awakeVid = null;
+const awakeOn = () => S.awake !== false;
+function vidFallback(on) {
+  if (on) {
+    if (!awakeVid) { awakeVid = document.createElement('video'); Object.assign(awakeVid, {src: 'awake.mp4', loop: true, muted: true, playsInline: true});
+      awakeVid.setAttribute('playsinline', ''); awakeVid.setAttribute('muted', ''); awakeVid.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;bottom:0;left:0';
+      document.body.appendChild(awakeVid); }
+    awakeVid.play().catch(() => {});
+  } else if (awakeVid) awakeVid.pause();
 }
-function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+async function lockWake() {
+  if (!awakeOn() || document.hidden) return;
+  if ('wakeLock' in navigator) {
+    if (wakeLock) return;
+    try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; awakeBtn(); }); awakeBtn(); return; } catch (e) {}
+  }
+  vidFallback(true); awakeBtn();
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; vidFallback(false); awakeBtn(); }
+function awakeBtn() { const b = $('#awakeBtn'); if (!b) return; b.classList.toggle('on', awakeOn()); b.title = awakeOn() ? 'Екран не гасне (натисни, щоб вимкнути)' : 'Екран гасне як зазвичай (натисни, щоб увімкнути)'; b.textContent = awakeOn() ? '🔆' : '🌙'; }
+document.addEventListener('pointerdown', () => { if (awakeOn() && !wakeLock) lockWake(); }, {passive: true});
 
 // ---------- таймер відпочинку (на мітках часу, не на тіках) ----------
 let restAlerted = false;
@@ -140,7 +155,7 @@ function finishSession() {
   s.end = Date.now(); s.duration = Math.round((s.end - s.start) / 1000);
   s.exercises.forEach(e => e.sets = e.sets.filter(t => t.done || t.w != null || t.r != null));
   s.volume = sessionVolume(s);
-  S.sessions.push(s); S.active = null; S.rest = null; save(); releaseWake();
+  S.sessions.push(s); S.active = null; S.rest = null; save();
   ui.tab = 'history'; ui.view = s.id; render();
 }
 
@@ -318,6 +333,7 @@ const curSession = () => ui.tab === 'workout' ? S.active : S.sessions.find(x => 
 // ---------- події ----------
 document.addEventListener('click', ev => {
   const tab = ev.target.closest('[data-tab]');
+  if (ev.target.closest('#awakeBtn')) { S.awake = !awakeOn(); save(); awakeBtn(); awakeOn() ? lockWake() : releaseWake(); return; }
   if (tab) { ui.tab = tab.dataset.tab; ui.view = null; render(); return; }
   const b = ev.target.closest('[data-act]'); if (!b || b.tagName === 'SELECT' || b.tagName === 'INPUT') return;
   const act = b.dataset.act, card = b.closest('[data-ei]'), s = curSession();
@@ -346,7 +362,7 @@ document.addEventListener('click', ev => {
       if (!n && !S.active.cardio.min && !confirm('Жодного виконаного підходу. Все одно завершити?')) return;
       finishSession();
     },
-    cancel() { if (confirm('Скасувати тренування? Дані цієї сесії буде втрачено.')) { S.active = null; S.rest = null; save(); releaseWake(); render(); } },
+    cancel() { if (confirm('Скасувати тренування? Дані цієї сесії буде втрачено.')) { S.active = null; S.rest = null; save(); render(); } },
     restAdd() { if (S.rest) { S.rest.endAt = Math.max(Date.now(), S.rest.endAt) + (+b.dataset.v) * 1000; restAlerted = false; save(); tick(); } },
     restSkip() { S.rest = null; save(); tick(); },
     open() { ui.view = b.dataset.id; render(); },
@@ -404,5 +420,5 @@ $('#importFile').addEventListener('change', async ev => {
   ev.target.value = '';
 });
 
-render(); lockWake();
+render(); awakeBtn(); lockWake();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('service-worker.js').catch(() => {});
