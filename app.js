@@ -253,11 +253,13 @@ const FB_ERR = {
   forbidden: 'Google відмовив у доступі (403). Перевір, що вхід виконано в той самий акаунт, де Fitbit, і що він доданий у тестувальники проєкту.',
 };
 let toastT;
-function toast(msg, bad) {
+function toast(msg, bad, action) {
   let el = $('#toast'); if (!el) { el = document.createElement('div'); el.id = 'toast'; el.setAttribute('role', 'status'); document.body.appendChild(el); }
-  el.textContent = msg; el.className = bad ? 'bad' : ''; el.hidden = false; clearTimeout(toastT);
-  toastT = setTimeout(() => el.hidden = true, bad ? 9000 : 5000);
+  el.textContent = msg; el.className = (bad ? 'bad' : '') + (action ? ' act' : ''); el.hidden = false; clearTimeout(toastT);
+  if (action) { const b = document.createElement('button'); b.className = 'text'; b.dataset.act = action.act; b.textContent = action.label; el.appendChild(b); }
+  toastT = setTimeout(() => el.hidden = true, action ? 15000 : bad ? 9000 : 5000);
 }
+const snack = (msg, label) => toast(msg, false, {act: 'syncLogin', label});
 const stripFb = n => String(n || '').replace(/\s*⌚ з Fitbit:[\s\S]*$/, '').trim();
 function applyFitbit(s, r) {
   s.fitbit = {at: r.at, cardio: r.cardio || null, strength: r.strength || null};
@@ -289,13 +291,114 @@ async function importFitbit(s, btn) {
   try {
     let tok = await tokP; say('Завантажую тренування з Fitbit…');
     const r = await Fitbit.importFor(tok, s.start, s.end || Date.now());
-    applyFitbit(s, r); rerender();
+    applyFitbit(s, r); rerender(); if (s.end) scheduleSync();
     const msg = [r.cardio && `кардіо ${r.cardio.min} хв${r.cardio.hr ? ', пульс ' + r.cardio.hr : ''}`, r.strength && `силове ${r.strength.min} хв${r.strength.hr ? ', пульс ' + r.strength.hr : ''}`].filter(Boolean).join('; ');
     toast('Підтягнуто з Fitbit: ' + msg + (r.cardio ? '' : '. Кардіо-тренування не знайдено.'));
   } catch (e) {
     if (e && e.code === 'expired') dropToken();
     say(''); toast(FB_ERR[e && e.code] || 'Не вдалося отримати дані з Fitbit' + (e && e.message ? ` (${e.message})` : '') + '. Спробуй ще раз.', true);
   } finally { fbBusy = false; btn.disabled = false; }
+}
+
+
+// ---------- Google Drive: автосинхронізація у файл sportik-data.json (scope drive.file — лише власний файл) ----------
+const DR_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DR_TOK = 'sportik.drTok', DR_KEY = 'sportik.drive';
+let D; try { D = JSON.parse(localStorage.getItem(DR_KEY)) || {}; } catch (e) { D = {}; }
+// D = {on, ok (вже давав згоду), fileId, last, pending, err}
+const saveD = () => { try { localStorage.setItem(DR_KEY, JSON.stringify(D)); } catch (e) {} };
+let drClient = null, drWaiter = null, drBusy = null, drTimer = null, drAgain = false;
+function drSaved() { try { const t = JSON.parse(sessionStorage.getItem(DR_TOK)); if (t && t.exp > Date.now() + 60000) return t.tok; } catch (e) {} return null; }
+const drDrop = () => { try { sessionStorage.removeItem(DR_TOK); } catch (e) {} };
+// interactive=true — лише з обробника натискання (вікно Google). prompt '' = тихий вхід, якщо згоду вже надано.
+function drToken(interactive) {
+  const t = drSaved(); if (t) return Promise.resolve(t);
+  if (!interactive) return Promise.reject(new DriveSync.DriveError('needauth'));
+  return new Promise((res, rej) => {
+    const go = () => {
+      drClient ||= google.accounts.oauth2.initTokenClient({client_id: GH_CLIENT_ID, scope: DR_SCOPE,
+        callback: r => { const w = drWaiter; drWaiter = null; if (!w) return;
+          if (r.error) return w.rej(new DriveSync.DriveError(r.error === 'access_denied' ? 'denied' : 'needauth', r.error));
+          if (google.accounts.oauth2.hasGrantedAllScopes && !google.accounts.oauth2.hasGrantedAllScopes(r, DR_SCOPE)) return w.rej(new DriveSync.DriveError('denied'));
+          try { sessionStorage.setItem(DR_TOK, JSON.stringify({tok: r.access_token, exp: Date.now() + (+r.expires_in || 3600) * 1000})); } catch (e) {}
+          D.ok = true; saveD(); w.res(r.access_token); },
+        error_callback: e => { const w = drWaiter; drWaiter = null;
+          w && w.rej(new DriveSync.DriveError(e && e.type === 'popup_failed_to_open' ? 'popup' : e && e.type === 'popup_closed' ? 'closed' : 'needauth')); }});
+      if (drWaiter) drWaiter.rej(new DriveSync.DriveError('closed'));
+      drWaiter = {res, rej};
+      drClient.requestAccessToken({prompt: D.ok ? '' : 'consent'});
+    };
+    if (window.google?.accounts?.oauth2) go(); else loadGis().then(go, () => rej(new DriveSync.DriveError('gis')));
+  });
+}
+const DR_ERR = {
+  disabled: 'Увімкни Google Drive API у Google Cloud проєкті.',
+  denied: 'Доступ до Google Drive не надано. Щоб синхронізувати, дозволь Спортіку створювати власний файл на Диску.',
+  scope: 'Немає дозволу на Google Drive. Натисни «Синхронізувати з Google Drive» і постав галочку доступу до Диска.',
+  popup: 'Браузер заблокував вікно входу Google. Натисни «Увійти» ще раз.',
+  closed: 'Вікно входу Google закрито — синхронізацію відкладено.',
+  network: "Немає зв'язку з Google Drive. Синхронізую пізніше.",
+  gis: 'Не вдалося завантажити вхід Google. Перевір інтернет.',
+  forbidden: 'Google Drive відмовив у доступі (403). Перевір акаунт і що він доданий у тестувальники проєкту.',
+};
+const drMsg = e => DR_ERR[e && e.code] || 'Не вдалося синхронізувати з Google Drive' + (e && e.message && e.message !== e.code ? ` (${e.message})` : '') + '.';
+function exportData() {
+  const last = S.sessions.reduce((a, x) => !a || x.start > a.start ? x : a, null), now = new Date().toISOString();
+  return {app: 'sportik', version: SCHEMA, exported: now, exportedAt: now, program: S.program, sessions: S.sessions,
+    settings: {awake: awakeOn()},
+    summary: {sessions: S.sessions.length, lastSession: last ? {id: last.id, date: new Date(last.start).toISOString(), dayName: last.dayName,
+      durationMin: Math.round((last.duration || 0) / 60), volumeKg: sessionVolume(last), sets: last.exercises.reduce((a, e) => a + e.sets.filter(t => t.done).length, 0)} : null}};
+}
+// Синхронізація. interactive — викликано з натискання (можна відкрити вікно Google).
+function syncDrive(interactive) {
+  if (drBusy) { drAgain = true; return drBusy; }
+  clearTimeout(drTimer); drTimer = null;
+  const tokP = drToken(interactive); // синхронно в межах натискання
+  drBusy = (async () => {
+    let tok;
+    try { tok = await tokP; } catch (e) {
+      D.pending = true; D.err = e.code === 'denied' ? DR_ERR.denied : ''; saveD(); syncUi();
+      if (e.code === 'needauth' || e.code === 'closed' || e.code === 'popup') snack(e.code === 'needauth' ? 'Зміни ще не на Google Drive: увійди для синхронізації.' : DR_ERR[e.code], 'Увійти');
+      else toast(drMsg(e), true);
+      return false;
+    }
+    try {
+      D.fileId = await DriveSync.upload(tok, exportData(), D.fileId);
+      D.last = Date.now(); D.pending = false; D.err = ''; D.on = true; saveD(); syncUi();
+      const t = $('#toast'); if (t && t.classList.contains('act')) t.hidden = true;
+      return true;
+    } catch (e) {
+      if (e.code === 'expired' || e.code === 'scope') drDrop();
+      D.pending = true; D.err = drMsg(e); saveD(); syncUi();
+      if (e.code === 'expired') snack('Вхід у Google застарів — увійди для синхронізації.', 'Увійти');
+      else toast(D.err, true);
+      return false;
+    }
+  })().finally(() => { drBusy = null; syncUi(); if (drAgain) { drAgain = false; scheduleSync(); } });
+  return drBusy;
+}
+// Після змін: через 5 с тиші (без вікна Google — якщо треба увійти, позначаємо «очікує»).
+function scheduleSync() {
+  if (!D.on) return;
+  D.pending = true; saveD(); clearTimeout(drTimer);
+  drTimer = setTimeout(() => syncDrive(false), 5000);
+}
+const fmtSync = t => t ? new Date(t).toLocaleString('uk-UA', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
+function syncStatus() {
+  if (drBusy) return 'Синхронізую…';
+  if (D.err && D.pending) return D.err;
+  if (D.pending && D.on) return 'Є зміни, що чекають синхронізації' + (D.last ? ` · остання ${fmtSync(D.last)}` : '');
+  return D.last ? 'Остання синхронізація: ' + fmtSync(D.last) : 'Ще не синхронізовано';
+}
+const syncLabel = () => D.pending && D.on && !drSaved() ? 'Увійти для синхронізації' : 'Синхронізувати з Google Drive';
+function syncUi() { const lb = $('#syncBtn .lbl'); if (lb) lb.textContent = syncLabel(); const bt = $('#syncBtn'); if (bt) bt.disabled = !!drBusy; const el = $('#syncSt'); if (el) { el.textContent = syncStatus(); el.classList.toggle('bad', !!(D.err && D.pending)); }
+  const sw = $('#syncOn'); if (sw) sw.setAttribute('aria-checked', String(!!D.on)); }
+function syncCard() {
+  return `<h2>Google Drive</h2><div class="card">
+    <div class="row between" style="flex-wrap:nowrap"><div><b>Автосинхронізація</b><div class="mut small">Після кожного тренування та змін в історії — у файл ${DriveSync.NAME} на твоєму Диску.</div></div>
+      <button class="switch" id="syncOn" role="switch" data-act="syncToggle" aria-checked="${!!D.on}" aria-label="Автосинхронізація з Google Drive"><i></i></button></div>
+    <div class="row" style="margin-top:10px"><button data-act="sync" id="syncBtn">${ic('cloud_sync', '☁')}<span class="lbl">${syncLabel()}</span></button></div>
+    <p class="mut small" id="syncSt">${esc(syncStatus())}</p></div>`;
 }
 
 // ---------- сесія ----------
@@ -331,6 +434,7 @@ function finishSession() {
   s.volume = sessionVolume(s);
   S.sessions.push(s); S.active = null; S.rest = null; ui.ssNext = null; save();
   ui.tab = 'history'; ui.view = s.id; render();
+  if (D.on) syncDrive(true);
 }
 
 function exCard(e, ei, s, live) {
@@ -506,7 +610,7 @@ function vProgram() {
         <div><label>Тип</label><select data-x="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${ex.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div></div>
       <div class="chips">${(ex.type || 'reps') === 'reps' ? `<button class="chip${ex.pair ? ' on' : ''}" data-act="exPair" aria-pressed="${!!ex.pair}">${ex.pair ? '✓ ' : ''}×2 гантелі</button>` : ''}${ssBtn(d.exercises, i).replace('data-act="ssLink"', 'data-act="exLink"').replace('data-act="ssUnlink"', 'data-act="exUnlink"')}</div></div>`).join('')}
     <div class="row" style="margin-top:10px"><button data-act="exAdd">${ic('add', '+')}вправа</button><button class="danger" data-act="dayDel">${ic('delete')}Видалити день</button></div></div>`;
-  return h + `<h2>Резервна копія</h2><div class="card"><div class="row"><button data-act="export">${ic('download', '⬇')}Експорт JSON</button><button class="outlined" data-act="import">${ic('upload', '⬆')}Імпорт JSON</button></div>
+  return h + syncCard() + `<h2>Резервна копія</h2><div class="card"><div class="row"><button data-act="export">${ic('download', '⬇')}Експорт JSON</button><button class="outlined" data-act="import">${ic('upload', '⬆')}Імпорт JSON</button></div>
     <p class="mut small">Дані зберігаються лише в цьому браузері. Робіть експорт час від часу.</p>
     <button class="danger" data-act="resetProg" style="padding-left:8px">${ic('restart_alt')}Відновити стандартну програму</button></div>`;
 }
@@ -518,7 +622,7 @@ function render() {
   if (!ui.keepScroll) { v.classList.remove('enter'); void v.offsetWidth; v.classList.add('enter'); }
   scrollTo(0, ui.keepScroll ? y : 0); ui.keepScroll = false;
   tick();
-  if (document.querySelector('[data-act=fitbit]') && navigator.onLine !== false) loadGis().catch(() => {});
+  if (document.querySelector('[data-act=fitbit],[data-act=sync]') && navigator.onLine !== false) loadGis().catch(() => {});
 }
 const rerender = () => { ui.keepScroll = true; render(); };
 const curSession = () => ui.tab === 'workout' ? S.active : S.sessions.find(x => x.id === ui.view);
@@ -584,10 +688,15 @@ document.addEventListener('click', ev => {
     },
     import() { $('#importFile').click(); },
     fitbit() { if (s) importFitbit(s, b); },
+    sync() { syncDrive(true); syncUi(); },
+    syncLogin() { $('#toast').hidden = true; syncDrive(true); },
+    syncToggle() { if (D.on) { D.on = false; D.pending = false; D.err = ''; clearTimeout(drTimer); saveD(); rerender(); } else syncDrive(true).then(() => rerender()); syncUi(); },
     resetProg() { if (confirm('Замінити програму на стандартну? Історія залишиться.')) { S.program = defaultProgram(); ui.editDay = null; ui.day = null; save(); render(); } },
   };
   A[act]?.();
+  if (A[act] && !NO_SYNC.has(act) && (ui.tab === 'program' || (ui.tab === 'history' && act !== 'open' && act !== 'back'))) scheduleSync();
 });
+const NO_SYNC = new Set(['open', 'back', 'editDay', 'export', 'import', 'pickDay', 'sync', 'syncLogin', 'syncToggle', 'restAdd', 'restSkip', 'fitbit', 'start', 'finish', 'cancel']);
 
 // Введення значень: зберігаємо без перерендеру, щоб не збивати фокус.
 document.addEventListener('input', ev => {
@@ -610,6 +719,7 @@ document.addEventListener('input', ev => {
   else return;
   if (s && s.end) s.volume = sessionVolume(s);
   save();
+  if ((s && s.end) || el.dataset.d || el.dataset.x) scheduleSync();
 });
 
 $('#importFile').addEventListener('change', async ev => {
@@ -620,7 +730,7 @@ $('#importFile').addEventListener('change', async ev => {
     if (!confirm(`Імпортувати ${d.sessions.length} тренувань і програму з ${d.program.length} днів? Поточні дані буде замінено.`)) return;
     migrate({v: d.version || 1, program: d.program});
     S.program = d.program; S.sessions = d.sessions.sort((a, b) => a.start - b.start); save(); ui = {tab: 'history'}; render();
-    toast('Імпорт виконано');
+    toast('Імпорт виконано'); scheduleSync();
   } catch (e) { toast('Не вдалося прочитати файл: це не резервна копія Спортіка.', true); }
   ev.target.value = '';
 });
@@ -638,4 +748,7 @@ document.addEventListener('pointerdown', ev => {
 }, {passive: true});
 
 render(); awakeBtn(); lockWake();
+// Відкладена синхронізація: якщо токен ще живий — одразу, інакше пропонуємо увійти (вікно Google — лише після натискання).
+if (D.on && D.pending) { if (drSaved()) syncDrive(false); else setTimeout(() => { if (D.pending && !drBusy && !drSaved()) snack('Зміни ще не на Google Drive: увійди для синхронізації.', 'Увійти'); }, 600); }
+addEventListener('online', () => { if (D.on && D.pending && drSaved()) syncDrive(false); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('service-worker.js').catch(() => {});
