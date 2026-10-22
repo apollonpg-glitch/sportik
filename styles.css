@@ -200,3 +200,39 @@ button.sslink{min-height:40px;padding:0 8px;margin:4px 0 0 -4px;color:var(--tert
 .switch[aria-checked=true]{background:var(--primary);box-shadow:none}
 .switch[aria-checked=true] i{left:24px;top:4px;width:24px;height:24px;background:var(--on-primary)}
 #syncSt{margin:10px 0 0}#syncSt.bad{color:var(--error)}
+/* Вхід через Google */
+body.gate nav#tabs,body.gate #awakeBtn,body.gate #sessionClock,body.gate header{display:none}
+body.gate main{padding-bottom:40px}
+.gate-wrap{max-width:440px;margin:0 auto;padding:calc(48px + env(safe-area-inset-top)) 4px 24px;display:flex;flex-direction:column;align-items:stretch}
+.gate-logo{width:96px;height:96px;margin:0 auto 20px;display:grid;place-items:center;border-radius:32px;background:var(--primary-container);color:var(--on-primary-container);font-size:44px;transform:rotate(-8deg)}
+.gate-logo .ms{font-size:52px;font-variation-settings:"FILL" 1,"wght" 600,"opsz" 48}
+.gate-h{font:700 44px/52px var(--font);font-stretch:125%;letter-spacing:-.02em;text-align:center;margin:0}
+.gate-sub{text-align:center;color:var(--on-surface-variant);margin:8px 12px 20px}
+.gate-list>div{display:flex;gap:14px;align-items:flex-start;padding:8px 0;font-size:15px;line-height:21px}
+.gate-list .ms,.gate-list .em{color:var(--primary);flex:0 0 auto;margin-top:-1px}
+label.check{display:flex;gap:14px;align-items:flex-start;padding:14px 16px;margin:4px 0 16px;border-radius:20px;background:var(--sc-low);font:400 15px/21px var(--font);color:var(--on-surface);cursor:pointer}
+label.check input{width:22px;height:22px;min-height:0;flex:0 0 auto;margin:0;accent-color:var(--primary);box-shadow:none}
+.g-logo{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;background:#fff;color:#4285F4;font:700 16px/1 Arial,sans-serif}
+.gate-err{color:var(--error);font:500 14px/20px var(--font);min-height:20px;text-align:center;margin:14px 8px 0}
+.gate-err:empty{display:none}
+/* Онбординг */
+.card.ob{background:var(--primary-container);color:var(--on-primary-container);padding:24px 20px;border-radius:28px}
+.card.ob .mut{color:inherit;opacity:.85}
+.ob-ic{font-size:36px;margin-bottom:8px}.ob-ic .ms{font-size:40px}
+/* Акаунт */
+.avatar{position:relative;width:48px;height:48px;flex:0 0 auto;border-radius:50%;background:var(--tertiary-container);color:var(--on-tertiary-container);display:grid;place-items:center;font:700 20px/1 var(--font);overflow:hidden}
+.avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.acct button{flex:0 0 auto;padding:0 16px}
+/* Діалог */
+.dlg-bg{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.42);display:grid;place-items:center;padding:24px;animation:fadeIn .2s both}
+.dlg{background:var(--sc-high);color:var(--on-surface);border-radius:28px;padding:24px;max-width:400px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.3);animation:dlgIn .4s var(--spring) both}
+.dlg h3{font:500 24px/32px var(--font);margin:0 0 12px}
+.dlg p{color:var(--on-surface-variant);margin:0 0 20px;font-size:15px;line-height:21px}
+.dlg-btns{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+@keyframes fadeIn{from{opacity:0}}@keyframes dlgIn{from{transform:scale(.85);opacity:0}}
+/* Fitbit у сесії */
+.small-btn{min-height:40px;font-size:14px}
+.fbwait{display:inline-flex;align-items:center;gap:6px;width:100%}
+.fbwait .ms{font-size:18px;animation:spin 2s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.fbauto{display:flex;align-items:center;gap:8px;margin-top:10px}.fbauto .ms{font-size:18px;color:var(--tertiary)}

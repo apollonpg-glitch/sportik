@@ -1,6 +1,10 @@
 /* Спортік — трекер тренувань. Vanilla JS, дані в localStorage. */
 'use strict';
-const KEY = 'sportik.v1';
+// Дані кожного акаунта окремо: sportik.v1:<email>. sportik.v1 без акаунта — старі дані (до входу через Google).
+const LEGACY = 'sportik.v1', USER_KEY = 'sportik.user', DRV = 'sportik.drive:', ACCT = 'sportik.acct:';
+let USER = null; try { USER = JSON.parse(localStorage.getItem(USER_KEY)); } catch (e) {}
+if (!USER || !USER.email) USER = null;
+let KEY = USER ? LEGACY + ':' + USER.email : null;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -112,16 +116,18 @@ function migrate(st) {
   return st;
 }
 let S;
+const blank = () => ({v: SCHEMA, program: [], sessions: [], active: null, rest: null});
 function load() {
-  try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
-  if (!S || !Array.isArray(S.program)) S = {v: SCHEMA, program: defaultProgram(), sessions: [], active: null, rest: null};
+  S = null;
+  if (KEY) try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
+  if (!S || !Array.isArray(S.program)) S = blank();
   S.sessions ||= []; S.active ??= null; S.rest ??= null;
   if ((S.v || 1) < SCHEMA) {
     try { localStorage.setItem(KEY + '.backup-v' + (S.v || 1), localStorage.getItem(KEY) || ''); } catch (e) {}
     migrate(S); save();
   }
 }
-function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
+function save() { if (KEY) localStorage.setItem(KEY, JSON.stringify(S)); }
 load();
 
 let ui = {tab: 'workout', day: null, view: null, progEx: null, editDay: null};
@@ -208,47 +214,33 @@ function tick() {
 setInterval(tick, 250);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); lockWake(); } });
 
-// ---------- Fitbit / Google Health (вхід через Google у браузері, без секрету) ----------
+// ---------- Вхід через Google (GIS у браузері, без секрету) і токени ----------
 const GH_CLIENT_ID = '1011377398999-6nn1j2r0clqsijevqrbkdngi2mv821mq.apps.googleusercontent.com';
-const GH_SCOPE = 'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly';
-const TOK_KEY = 'sportik.ghTok', OK_KEY = 'sportik.ghOk';
-let gisP = null, tokClient = null, tokWaiter = null, fbBusy = false;
+let gisP = null;
 function loadGis() {
   if (window.google?.accounts?.oauth2) return Promise.resolve();
   return gisP ||= new Promise((res, rej) => {
     const sc = document.createElement('script'); sc.src = 'https://accounts.google.com/gsi/client'; sc.async = true;
-    sc.onload = () => res(); sc.onerror = () => { gisP = null; sc.remove(); rej(new Fitbit.FitbitError('gis')); };
+    sc.onload = () => res(); sc.onerror = () => { gisP = null; sc.remove(); rej(new Auth.AuthError('gis')); };
     document.head.appendChild(sc);
   });
 }
-function savedToken() { try { const t = JSON.parse(sessionStorage.getItem(TOK_KEY)); if (t && t.exp > Date.now() + 60000) return t.tok; } catch (e) {} return null; }
-const dropToken = () => { try { sessionStorage.removeItem(TOK_KEY); } catch (e) {} };
-// Викликати синхронно з обробника натискання, інакше браузер може заблокувати вікно Google.
-function getToken() {
-  const t = savedToken(); if (t) return Promise.resolve(t);
-  return new Promise((res, rej) => {
-    const go = () => {
-      tokClient ||= google.accounts.oauth2.initTokenClient({client_id: GH_CLIENT_ID, scope: GH_SCOPE,
-        callback: r => { const w = tokWaiter; tokWaiter = null; if (!w) return;
-          if (r.error) return w.rej(new Fitbit.FitbitError(r.error === 'access_denied' ? 'denied' : 'auth', r.error));
-          if (google.accounts.oauth2.hasGrantedAllScopes && !google.accounts.oauth2.hasGrantedAllScopes(r, GH_SCOPE)) return w.rej(new Fitbit.FitbitError('denied'));
-          try { sessionStorage.setItem(TOK_KEY, JSON.stringify({tok: r.access_token, exp: Date.now() + (+r.expires_in || 3600) * 1000})); } catch (e) {}
-          localStorage.setItem(OK_KEY, '1'); w.res(r.access_token); },
-        error_callback: e => { const w = tokWaiter; tokWaiter = null;
-          w && w.rej(new Fitbit.FitbitError(e && e.type === 'popup_failed_to_open' ? 'popup' : e && e.type === 'popup_closed' ? 'closed' : 'auth')); }});
-      tokWaiter = {res, rej};
-      tokClient.requestAccessToken({prompt: localStorage.getItem(OK_KEY) ? '' : 'consent'});
-    };
-    if (window.google?.accounts?.oauth2) go(); else loadGis().then(go, rej);
-  });
-}
+const AU = Auth.create({clientId: GH_CLIENT_ID, storage: localStorage, oauth2: () => window.google?.accounts?.oauth2 || null, loadGis});
+// Токен для потрібних scope. interactive — лише з обробника натискання (може відкрити вікно Google).
+const tokenFor = (scopes, interactive) => USER ? AU.token(USER.email, scopes, {interactive}) : Promise.reject(new Auth.AuthError('needauth'));
+const hasTok = scopes => !!(USER && AU.cached(USER.email, scopes));
+// Налаштування акаунта на цьому пристрої: {health}
+let M = {};
+const saveM = () => { if (USER) try { localStorage.setItem(ACCT + USER.email, JSON.stringify(M)); } catch (e) {} };
+
 const FB_ERR = {
-  popup: 'Браузер заблокував вікно входу Google. Натисни «Підтягнути з Fitbit» ще раз (або дозволь спливаючі вікна для цього сайту).',
+  popup: 'Браузер заблокував вікно входу Google. Натисни ще раз (або дозволь спливаючі вікна для цього сайту).',
   closed: 'Вікно входу Google закрито. Натисни ще раз і увійди в акаунт, до якого підключений Fitbit.',
   denied: 'Доступ не надано. Щоб підтягувати кардіо, дозволь Спортіку читати дані «Активність і фітнес» у Google.',
-  expired: 'Вхід у Google застарів. Натисни «Підтягнути з Fitbit» ще раз.',
-  none: 'Не знайшов тренувань Fitbit на час цього тренування (±1 год). Відкрий застосунок Fitbit, щоб браслет синхронізувався, зачекай хвилину й спробуй ще раз. На браслеті тренування треба запускати вручну («Силове тренування», «Бігова доріжка»).',
-  network: "Немає зв'язку з Google. Перевір інтернет і спробуй ще раз.",
+  needauth: 'Вхід у Google застарів. Натисни «Оновити з Fitbit».',
+  expired: 'Вхід у Google застарів. Натисни «Оновити з Fitbit».',
+  none: 'Дані Fitbit ще не синхронізовані — відкрий додаток Fitbit. Спортік підтягне їх сам, щойно вони з’являться.',
+  network: "Немає зв'язку з Google. Спробую пізніше.",
   gis: 'Не вдалося завантажити вхід Google. Перевір інтернет і спробуй ще раз.',
   forbidden: 'Google відмовив у доступі (403). Перевір, що вхід виконано в той самий акаунт, де Fitbit, і що він доданий у тестувальники проєкту.',
 };
@@ -257,7 +249,7 @@ function toast(msg, bad, action) {
   let el = $('#toast'); if (!el) { el = document.createElement('div'); el.id = 'toast'; el.setAttribute('role', 'status'); document.body.appendChild(el); }
   el.textContent = msg; el.className = (bad ? 'bad' : '') + (action ? ' act' : ''); el.hidden = false; clearTimeout(toastT);
   if (action) { const b = document.createElement('button'); b.className = 'text'; b.dataset.act = action.act; b.textContent = action.label; el.appendChild(b); }
-  toastT = setTimeout(() => el.hidden = true, action ? 15000 : bad ? 9000 : 5000);
+  toastT = setTimeout(() => el.hidden = true, action ? 15000 : bad ? 9000 : 6000);
 }
 const snack = (msg, label) => toast(msg, false, {act: 'syncLogin', label});
 const stripFb = n => String(n || '').replace(/\s*⌚ з Fitbit:[\s\S]*$/, '').trim();
@@ -274,6 +266,7 @@ function fbSummary(s) {
   const p = []; const c = s.fitbit?.cardio, st = s.fitbit?.strength;
   if (st) p.push(`силове ${st.min} хв${st.hr ? ' · пульс ' + st.hr : ''}`);
   if (c) p.push(`кардіо ${c.min} хв`);
+  if (!p.length && s.fitbitPending) return '⌚ чекаю дані Fitbit…';
   return p.length ? '⌚ ' + p.join(', ') : '';
 }
 function strengthLine(st) {
@@ -282,55 +275,61 @@ function strengthLine(st) {
   if (st.kcal) p.push(st.kcal + ' ккал'); if (st.azm) p.push('АЗМ ' + st.azm);
   return `<div class="fb">⌚ Силове з Fitbit: ${esc(p.join(' · '))}</div>`;
 }
-async function importFitbit(s, btn) {
-  if (fbBusy) return; fbBusy = true;
-  const tokP = getToken(); // синхронно в межах натискання
-  const st = btn.parentElement.querySelector('.fbst'); btn.disabled = true;
-  const say = m => { if (st) st.textContent = m; };
-  say('Вхід у Google…');
+const FB_WINDOW = 48 * 3600e3;
+const fbMsg = r => [r.cardio && `кардіо ${r.cardio.min} хв${r.cardio.hr ? ', пульс ' + r.cardio.hr : ''}`, r.strength && `силове ${r.strength.min} хв${r.strength.hr ? ', пульс ' + r.strength.hr : ''}`].filter(Boolean).join('; ');
+const fbBusy = new Set();
+// Імпорт з Fitbit для сесії. opt: {tokP (вже запитаний токен), interactive, auto (тихий повтор), btn}
+// Повертає 'ok' | 'partial' | 'none' | 'error'.
+async function fbRun(s, opt = {}) {
+  if (fbBusy.has(s.id)) return 'busy'; fbBusy.add(s.id);
+  const tokP = opt.tokP || tokenFor(['health'], !!opt.interactive); // синхронно в межах натискання
+  const st = opt.btn && opt.btn.parentElement.querySelector('.fbst'), say = m => { if (st) st.textContent = m; };
+  if (opt.btn) { opt.btn.disabled = true; say('Вхід у Google…'); }
   try {
-    let tok = await tokP; say('Завантажую тренування з Fitbit…');
+    const tok = await tokP; say('Завантажую тренування з Fitbit…');
     const r = await Fitbit.importFor(tok, s.start, s.end || Date.now());
-    applyFitbit(s, r); rerender(); if (s.end) scheduleSync();
-    const msg = [r.cardio && `кардіо ${r.cardio.min} хв${r.cardio.hr ? ', пульс ' + r.cardio.hr : ''}`, r.strength && `силове ${r.strength.min} хв${r.strength.hr ? ', пульс ' + r.strength.hr : ''}`].filter(Boolean).join('; ');
-    toast('Підтягнуто з Fitbit: ' + msg + (r.cardio ? '' : '. Кардіо-тренування не знайдено.'));
+    applyFitbit(s, r);
+    // Силове вмикається на браслеті останнім: якщо його ще немає — пізніше спробуємо знову.
+    s.fitbitPending = !r.strength && !!s.end && Date.now() - s.end < FB_WINDOW;
+    save(); if (ui.tab === 'history' || ui.tab === 'workout') rerender();
+    toast('Підтягнуто з Fitbit: ' + fbMsg(r) + (s.fitbitPending ? '. Силове ще не синхронізоване — підтягну, щойно з’явиться.' : r.cardio ? '' : '. Кардіо-тренування не знайдено.'));
+    if (s.end) scheduleSync(opt.auto ? 0 : 5000);
+    return s.fitbitPending ? 'partial' : 'ok';
   } catch (e) {
-    if (e && e.code === 'expired') dropToken();
-    say(''); toast(FB_ERR[e && e.code] || 'Не вдалося отримати дані з Fitbit' + (e && e.message ? ` (${e.message})` : '') + '. Спробуй ще раз.', true);
-  } finally { fbBusy = false; btn.disabled = false; }
+    const code = e && e.code;
+    if (code === 'expired') AU.drop(USER.email);
+    if (s.end && Date.now() - s.end < FB_WINDOW && (code === 'none' || opt.finish || opt.auto)) { if (!s.fitbitPending) { s.fitbitPending = true; save(); } }
+    if (code === 'none' && s.end && Date.now() - s.end >= FB_WINDOW) { s.fitbitPending = false; save(); }
+    if (!opt.auto) {
+      say('');
+      toast(FB_ERR[code] || 'Не вдалося отримати дані з Fitbit' + (e && e.message ? ` (${e.message})` : '') + '. Спробуй ще раз.', code !== 'none');
+    }
+    if (ui.tab === 'history') rerender();
+    return code === 'none' ? 'none' : 'error';
+  } finally { fbBusy.delete(s.id); if (opt.btn) opt.btn.disabled = false; }
 }
-
+// Тихий повтор для сесій за 48 год, що чекають на Fitbit: лише з дійсним токеном, без вікон Google.
+let fbLastRetry = 0;
+async function retryFitbit(force) {
+  if (!USER || !M.health || document.hidden || navigator.onLine === false) return 0;
+  if (!force && Date.now() - fbLastRetry < 60000) return 0;
+  let changed = false;
+  for (const s of S.sessions) if (s.fitbitPending && s.end && Date.now() - s.end >= FB_WINDOW) { s.fitbitPending = false; changed = true; }
+  if (changed) save();
+  const list = S.sessions.filter(s => s.fitbitPending && s.end);
+  if (!list.length || !hasTok(['health'])) return 0;
+  fbLastRetry = Date.now();
+  let n = 0;
+  for (const s of list) { const r = await fbRun(s, {auto: true}); if (r === 'ok' || r === 'partial') n++; }
+  return n;
+}
 
 // ---------- Google Drive: автосинхронізація у файл sportik-data.json (scope drive.file — лише власний файл) ----------
-const DR_SCOPE = 'https://www.googleapis.com/auth/drive.file';
-const DR_TOK = 'sportik.drTok', DR_KEY = 'sportik.drive';
-let D; try { D = JSON.parse(localStorage.getItem(DR_KEY)) || {}; } catch (e) { D = {}; }
-// D = {on, ok (вже давав згоду), fileId, last, pending, err}
-const saveD = () => { try { localStorage.setItem(DR_KEY, JSON.stringify(D)); } catch (e) {} };
-let drClient = null, drWaiter = null, drBusy = null, drTimer = null, drAgain = false;
-function drSaved() { try { const t = JSON.parse(sessionStorage.getItem(DR_TOK)); if (t && t.exp > Date.now() + 60000) return t.tok; } catch (e) {} return null; }
-const drDrop = () => { try { sessionStorage.removeItem(DR_TOK); } catch (e) {} };
-// interactive=true — лише з обробника натискання (вікно Google). prompt '' = тихий вхід, якщо згоду вже надано.
-function drToken(interactive) {
-  const t = drSaved(); if (t) return Promise.resolve(t);
-  if (!interactive) return Promise.reject(new DriveSync.DriveError('needauth'));
-  return new Promise((res, rej) => {
-    const go = () => {
-      drClient ||= google.accounts.oauth2.initTokenClient({client_id: GH_CLIENT_ID, scope: DR_SCOPE,
-        callback: r => { const w = drWaiter; drWaiter = null; if (!w) return;
-          if (r.error) return w.rej(new DriveSync.DriveError(r.error === 'access_denied' ? 'denied' : 'needauth', r.error));
-          if (google.accounts.oauth2.hasGrantedAllScopes && !google.accounts.oauth2.hasGrantedAllScopes(r, DR_SCOPE)) return w.rej(new DriveSync.DriveError('denied'));
-          try { sessionStorage.setItem(DR_TOK, JSON.stringify({tok: r.access_token, exp: Date.now() + (+r.expires_in || 3600) * 1000})); } catch (e) {}
-          D.ok = true; saveD(); w.res(r.access_token); },
-        error_callback: e => { const w = drWaiter; drWaiter = null;
-          w && w.rej(new DriveSync.DriveError(e && e.type === 'popup_failed_to_open' ? 'popup' : e && e.type === 'popup_closed' ? 'closed' : 'needauth')); }});
-      if (drWaiter) drWaiter.rej(new DriveSync.DriveError('closed'));
-      drWaiter = {res, rej};
-      drClient.requestAccessToken({prompt: D.ok ? '' : 'consent'});
-    };
-    if (window.google?.accounts?.oauth2) go(); else loadGis().then(go, () => rej(new DriveSync.DriveError('gis')));
-  });
-}
+let D = {};
+// D = {on, fileId, last, pending, err}
+const saveD = () => { if (USER) try { localStorage.setItem(DRV + USER.email, JSON.stringify(D)); } catch (e) {} };
+let drBusy = null, drTimer = null, drAgain = false;
+const drSaved = () => hasTok(['drive']);
 const DR_ERR = {
   disabled: 'Увімкни Google Drive API у Google Cloud проєкті.',
   denied: 'Доступ до Google Drive не надано. Щоб синхронізувати, дозволь Спортіку створювати власний файл на Диску.',
@@ -344,16 +343,17 @@ const DR_ERR = {
 const drMsg = e => DR_ERR[e && e.code] || 'Не вдалося синхронізувати з Google Drive' + (e && e.message && e.message !== e.code ? ` (${e.message})` : '') + '.';
 function exportData() {
   const last = S.sessions.reduce((a, x) => !a || x.start > a.start ? x : a, null), now = new Date().toISOString();
-  return {app: 'sportik', version: SCHEMA, exported: now, exportedAt: now, program: S.program, sessions: S.sessions,
+  return {app: 'sportik', version: SCHEMA, exported: now, exportedAt: now, account: USER ? USER.email : undefined, program: S.program, sessions: S.sessions,
     settings: {awake: awakeOn()},
     summary: {sessions: S.sessions.length, lastSession: last ? {id: last.id, date: new Date(last.start).toISOString(), dayName: last.dayName,
       durationMin: Math.round((last.duration || 0) / 60), volumeKg: sessionVolume(last), sets: last.exercises.reduce((a, e) => a + e.sets.filter(t => t.done).length, 0)} : null}};
 }
 // Синхронізація. interactive — викликано з натискання (можна відкрити вікно Google).
 function syncDrive(interactive) {
+  if (!USER) return Promise.resolve(false);
   if (drBusy) { drAgain = true; return drBusy; }
   clearTimeout(drTimer); drTimer = null;
-  const tokP = drToken(interactive); // синхронно в межах натискання
+  const tokP = tokenFor(['drive'], interactive); // синхронно в межах натискання
   drBusy = (async () => {
     let tok;
     try { tok = await tokP; } catch (e) {
@@ -363,12 +363,12 @@ function syncDrive(interactive) {
       return false;
     }
     try {
-      D.fileId = await DriveSync.upload(tok, exportData(), D.fileId);
-      D.last = Date.now(); D.pending = false; D.err = ''; D.on = true; saveD(); syncUi();
+      D.fileId = await DriveSync.upload(tok, exportData(), D.fresh ? null : D.fileId, undefined, {fresh: !!D.fresh});
+      delete D.fresh; D.last = Date.now(); D.pending = false; D.err = ''; D.on = true; saveD(); syncUi();
       const t = $('#toast'); if (t && t.classList.contains('act')) t.hidden = true;
       return true;
     } catch (e) {
-      if (e.code === 'expired' || e.code === 'scope') drDrop();
+      if (e.code === 'expired' || e.code === 'scope') AU.drop(USER.email);
       D.pending = true; D.err = drMsg(e); saveD(); syncUi();
       if (e.code === 'expired') snack('Вхід у Google застарів — увійди для синхронізації.', 'Увійти');
       else toast(D.err, true);
@@ -378,10 +378,10 @@ function syncDrive(interactive) {
   return drBusy;
 }
 // Після змін: через 5 с тиші (без вікна Google — якщо треба увійти, позначаємо «очікує»).
-function scheduleSync() {
-  if (!D.on) return;
+function scheduleSync(delay = 5000) {
+  if (!D.on || !USER) return;
   D.pending = true; saveD(); clearTimeout(drTimer);
-  drTimer = setTimeout(() => syncDrive(false), 5000);
+  drTimer = setTimeout(() => syncDrive(false), delay);
 }
 const fmtSync = t => t ? new Date(t).toLocaleString('uk-UA', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
 function syncStatus() {
@@ -395,12 +395,168 @@ function syncUi() { const lb = $('#syncBtn .lbl'); if (lb) lb.textContent = sync
   const sw = $('#syncOn'); if (sw) sw.setAttribute('aria-checked', String(!!D.on)); }
 function syncCard() {
   return `<h2>Google Drive</h2><div class="card">
-    <div class="row between" style="flex-wrap:nowrap"><div><b>Автосинхронізація</b><div class="mut small">Після кожного тренування та змін в історії — у файл ${DriveSync.NAME} на твоєму Диску.</div></div>
+    <div class="row between" style="flex-wrap:nowrap"><div><b>Резервна копія</b><div class="mut small">Після кожного тренування та змін — у файл ${DriveSync.NAME} на твоєму Диску. Спортік бачить лише цей файл.</div></div>
       <button class="switch" id="syncOn" role="switch" data-act="syncToggle" aria-checked="${!!D.on}" aria-label="Автосинхронізація з Google Drive"><i></i></button></div>
     <div class="row" style="margin-top:10px"><button data-act="sync" id="syncBtn">${ic('cloud_sync', '☁')}<span class="lbl">${syncLabel()}</span></button></div>
     <p class="mut small" id="syncSt">${esc(syncStatus())}</p></div>`;
 }
+const HEALTH_DISCLOSURE = 'Спортік читає з Google Health лише твої тренування (тип, час, тривалість, пульс, калорії, дистанцію), щоб заповнити кардіо й силове. Дані лишаються на телефоні та в твоєму Google Диску.';
+function fitbitCard() {
+  return `<h2>Fitbit</h2><div class="card">
+    <div class="row between" style="flex-wrap:nowrap"><div><b>Fitbit / Google Health</b><div class="mut small">${M.health ? 'Підключено: після «Завершити тренування» кардіо й силове підтягуються самі.' : 'Не підключено.'}</div></div>
+      ${M.health ? '<span class="tag">✓ підключено</span>' : ''}</div>
+    <p class="mut small">${esc(HEALTH_DISCLOSURE)}</p>
+    <div class="row">${M.health ? `<button class="outlined" data-act="fbDisconnect">${ic('link_off', '⛓')}Відключити</button>` : `<button data-act="fbConnect">${ic('watch', '⌚')}Підключити Fitbit / Google Health</button>`}</div></div>`;
+}
+function accountCard() {
+  if (!USER) return '';
+  const ini = esc((USER.name || USER.email).trim()[0]?.toUpperCase() || '?');
+  return `<h2>Акаунт</h2><div class="card acct"><div class="row" style="flex-wrap:nowrap">
+    <div class="avatar">${USER.picture ? `<img src="${esc(USER.picture)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<span>${ini}</span></div>
+    <div style="min-width:0;flex:1"><b>${esc(USER.name || USER.email)}</b><div class="mut small" style="overflow:hidden;text-overflow:ellipsis">${esc(USER.email)}</div></div>
+    <button class="outlined" data-act="signOut">${ic('logout', '⎋')}Вийти</button></div></div>`;
+}
 
+// ---------- діалог (M3) ----------
+function ask(title, text, buttons) {
+  return new Promise(res => {
+    const bg = document.createElement('div'); bg.className = 'dlg-bg';
+    bg.innerHTML = `<div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgT"><h3 id="dlgT">${esc(title)}</h3><p>${esc(text)}</p>
+      <div class="dlg-btns">${buttons.map((b, i) => `<button class="${b.primary ? 'primary' : 'text'}" data-dlg="${i}">${esc(b.label)}</button>`).join('')}</div></div>`;
+    bg.addEventListener('click', ev => { const b = ev.target.closest('[data-dlg]'); if (!b) return; ev.stopPropagation(); bg.remove(); res(buttons[+b.dataset.dlg].value); });
+    document.body.appendChild(bg);
+  });
+}
+
+// ---------- вхід, міграція даних телефона, відновлення з Диска ----------
+const GATE_ERR = {
+  denied: 'Google не пустив цей акаунт. Спортік поки в тестовому режимі — увійти можуть лише акаунти зі списку тестувальників. Попроси власника додати твою пошту, або увійди іншим акаунтом.',
+  closed: 'Вікно входу Google закрито. Якщо Google написав «Доступ заблоковано» (403 access_denied) — застосунок у тестовому режимі: попроси власника додати твою пошту в тестувальники.',
+  popup: 'Браузер заблокував вікно входу Google. Дозволь спливаючі вікна для цього сайту й натисни ще раз.',
+  gis: 'Не вдалося завантажити вхід Google. Перевір інтернет і спробуй ще раз.',
+  network: "Немає зв'язку з Google. Перевір інтернет і спробуй ще раз.",
+  noemail: 'Google не передав адресу пошти. Натисни ще раз і дозволь доступ до адреси email.',
+};
+const gateMsg = e => GATE_ERR[e && e.code] || 'Не вдалося увійти через Google' + (e && e.message && e.message !== e.code ? ` (${e.message})` : '') + '. Спробуй ще раз.';
+let signing = false;
+function legacyData() {
+  try { const d = JSON.parse(localStorage.getItem(LEGACY)); if (d && Array.isArray(d.program) && (d.sessions?.length || d.program.length || d.active)) return d; } catch (e) {}
+  return null;
+}
+async function signIn(withHealth) {
+  if (signing) return; signing = true;
+  const scopes = ['openid', 'email', 'profile', 'drive'].concat(withHealth ? ['health'] : []);
+  const p = AU.request(scopes, {prompt: 'select_account'}); // синхронно в межах натискання
+  const err = $('#gateErr'), btn = $('[data-act=signIn]');
+  if (err) err.textContent = ''; if (btn) btn.disabled = true;
+  try {
+    const r = await p;
+    const info = await Auth.userinfo(r.access_token);
+    AU.write(info.email, r);
+    await enterUser(info, {drive: Auth.has(r.scope, 'drive'), health: Auth.has(r.scope, 'health'), wantHealth: withHealth});
+  } catch (e) {
+    const el = $('#gateErr'); if (el) el.textContent = gateMsg(e); else toast(gateMsg(e), true);
+  } finally { signing = false; const b = $('[data-act=signIn]'); if (b) b.disabled = false; }
+}
+async function enterUser(info, g) {
+  USER = info; KEY = LEGACY + ':' + info.email;
+  localStorage.setItem(USER_KEY, JSON.stringify(info));
+  try { M = JSON.parse(localStorage.getItem(ACCT + info.email)) || {}; } catch (e) { M = {}; }
+  try { D = JSON.parse(localStorage.getItem(DRV + info.email)) || null; } catch (e) { D = null; }
+  const fresh = !localStorage.getItem(KEY);
+  D ||= {on: g.drive};
+  if (g.health) M.health = true;
+  let restored = false, adopted = false;
+  if (fresh) {
+    const legacy = legacyData();
+    if (legacy) {
+      const n = (legacy.sessions || []).length, lastS = (legacy.sessions || []).reduce((a, x) => Math.max(a, x.start || 0), 0);
+      const ok = await ask('У цьому телефоні є збережені тренування — це твої?',
+        `${n} тренувань${lastS ? ', останнє ' + fmtDate(lastS) : ''}, програма з ${legacy.program.length} днів. Якщо так — вони перейдуть у твій акаунт ${info.email}.`,
+        [{label: 'Ні, не мої', value: false}, {label: 'Так, мої', value: true, primary: true}]);
+      if (ok) { adoptLegacy(info.email); adopted = true; }
+    }
+    if (!adopted && g.drive) restored = await offerRestore();
+    if (!adopted && !restored) { S = blank(); save(); }
+  }
+  load();
+  if (adopted && g.drive) await mergeFromDrive();
+  saveM(); saveD();
+  ui = {tab: 'workout', day: null, view: null, progEx: null, editDay: null};
+  document.body.classList.remove('gate'); render(); awakeBtn(); lockWake();
+  if (g.wantHealth && !g.health) toast('Доступ до Google Health не надано — Fitbit можна підключити пізніше в «Програма» → Fitbit.', true);
+  else if (!g.drive) toast('Без доступу до Google Drive резервна копія вимкнена. Увімкни її в «Програма» → Google Drive.', true);
+  else if (adopted) toast('Тренування з цього телефона тепер у твоєму акаунті.');
+  else if (restored) toast('Відновлено з Google Drive.');
+  if (D.on && g.drive && (fresh || D.pending)) syncDrive(false);
+  retryFitbit(true);
+}
+// Перенести дані без акаунта (sportik.v1) в простір цього акаунта. Сира копія лишається.
+function adoptLegacy(email) {
+  const raw = localStorage.getItem(LEGACY), rawDrive = localStorage.getItem('sportik.drive');
+  localStorage.setItem('sportik.v1.adopted-backup', JSON.stringify({email, at: Date.now(), data: raw, drive: rawDrive}));
+  localStorage.setItem(KEY, raw);
+  localStorage.removeItem(LEGACY);
+  let od = {}; try { od = JSON.parse(rawDrive) || {}; } catch (e) {}
+  // fileId міг належати іншому акаунту — файл знайдемо за назвою на Диску цього акаунта.
+  D = {on: D.on || !!od.on, last: od.last, pending: true};
+  if (localStorage.getItem('sportik.ghOk')) M.health = true;
+  ['sportik.drive', 'sportik.ghOk'].forEach(k => localStorage.removeItem(k));
+}
+// Тренування з Диска, яких немає на телефоні, додаємо (нічого не губимо).
+async function mergeFromDrive() {
+  try {
+    const tok = await tokenFor(['drive'], false), meta = await DriveSync.findMeta(tok);
+    if (!meta) return; D.fileId = meta.id;
+    const d = await DriveSync.download(tok, meta.id), have = new Set(S.sessions.map(x => x.id));
+    const extra = (d.sessions || []).filter(x => x && x.id && !have.has(x.id));
+    if (extra.length) { S.sessions = S.sessions.concat(extra).sort((a, b) => a.start - b.start); save(); }
+  } catch (e) {}
+}
+async function offerRestore() {
+  let tok, meta, d;
+  try { tok = await tokenFor(['drive'], false); meta = await DriveSync.findMeta(tok); if (!meta) return false; d = await DriveSync.download(tok, meta.id); }
+  catch (e) { toast('Не вдалося перевірити резервну копію на Google Drive: ' + drMsg(e), true); D.fresh = true; return false; } // нічого не перезапишемо
+  if (!d || !Array.isArray(d.program) || !Array.isArray(d.sessions)) return false;
+  const when = meta.modifiedTime ? fmtSync(Date.parse(meta.modifiedTime)) : '';
+  const ok = await ask('Знайшов резервну копію на Google Drive',
+    `${d.sessions.length} тренувань, програма з ${d.program.length} днів${when ? ', збережено ' + when : ''}. Відновити її на цьому телефоні?`,
+    [{label: 'Почати з нуля', value: false}, {label: 'Відновити', value: true, primary: true}]);
+  if (!ok) { D.fresh = true; return false; } // стару копію не перезаписуємо — створимо новий файл
+  const st = {v: d.version || 1, program: d.program, sessions: d.sessions.sort((a, b) => a.start - b.start), active: null, rest: null, setup: true};
+  if (d.settings && d.settings.awake === false) st.awake = false;
+  migrate(st); localStorage.setItem(KEY, JSON.stringify(st));
+  D.fileId = meta.id; D.last = Date.parse(meta.modifiedTime) || Date.now(); D.pending = false;
+  return true;
+}
+async function signOut() {
+  if (D.on && D.pending && !confirm('Є зміни, які ще не потрапили на Google Drive. Вони лишаться на цьому телефоні й синхронізуються, коли ти знову увійдеш. Вийти?')) return;
+  clearTimeout(drTimer); AU.drop(USER.email);
+  localStorage.removeItem(USER_KEY); USER = null; KEY = null; M = {}; D = {};
+  releaseWake(); S = blank(); ui = {tab: 'workout'}; render();
+}
+function vGate() {
+  const fb = !!localStorage.getItem('sportik.ghOk');
+  return `<div class="gate-wrap"><div class="gate-logo">${ic('fitness_center', '🏋️')}</div>
+    <h1 class="gate-h">Спортік</h1>
+    <p class="gate-sub">Трекер тренувань: програма, підходи, таймер відпочинку й прогрес.</p>
+    <div class="card gate-list">
+      <div>${ic('cloud_done', '☁')}<span>Резервна копія на <b>твоєму</b> Google Диску — у файлі ${DriveSync.NAME}. Інших файлів Спортік не бачить.</span></div>
+      <div>${ic('lock', '🔒')}<span>Тренування лише на цьому телефоні й у твоєму Диску. Жодних серверів.</span></div>
+      <div>${ic('watch', '⌚')}<span>За бажанням — кардіо й пульс з Fitbit.</span></div></div>
+    <label class="check"><input type="checkbox" id="gateHealth" ${fb ? 'checked' : ''}><span><b>Підключити Fitbit / Google Health</b><br><span class="mut small">${esc(HEALTH_DISCLOSURE)}</span></span></label>
+    <button class="primary big" data-act="signIn"><span class="g-logo" aria-hidden="true">G</span>Увійти через Google</button>
+    <p id="gateErr" class="gate-err" role="alert"></p></div>`;
+}
+function vOnboard() {
+  return `<h2>Вітаю${USER && USER.name ? ', ' + esc(USER.name.split(' ')[0]) : ''}!</h2>
+    <div class="card ob"><div class="ob-ic">${ic('edit_note', '📝')}</div><h3>Створи свою програму</h3>
+      <p class="mut">Додай дні тренувань і вправи — або почни зі зразка й підлаштуй під себе.</p>
+      <button class="primary big" data-act="obCreate">${ic('add', '+')}Створити свою програму</button>
+      <div style="height:8px"></div><button class="big" data-act="obSample">${ic('content_copy', '⧉')}Взяти зразок 5-денної програми</button></div>
+    ${M.health ? `<div class="card"><b>⌚ Fitbit підключено</b><p class="mut small">Після «Завершити тренування» кардіо й силове підтягнуться самі.</p></div>`
+      : `<div class="card"><h3>Fitbit / Google Health</h3><p class="mut small">${esc(HEALTH_DISCLOSURE)}</p><button data-act="fbConnect">${ic('watch', '⌚')}Підключити Fitbit / Google Health</button></div>`}`;
+}
 // ---------- сесія ----------
 function newSession(day) {
   return {id: uid(), dayId: day.id, dayName: `${day.short} · ${day.name}`, start: Date.now(), end: null,
@@ -432,9 +588,17 @@ function finishSession() {
   s.end = Date.now(); s.duration = Math.round((s.end - s.start) / 1000);
   s.exercises.forEach(e => e.sets = e.sets.filter(t => t.done || t.w != null || t.r != null));
   s.volume = sessionVolume(s);
+  // Один запит на всі потрібні дозволи — синхронно в межах натискання (вікно Google, лише якщо токен сплив).
+  const scopes = [...(D.on ? ['drive'] : []), ...(M.health ? ['health'] : [])];
+  const tokP = scopes.length ? tokenFor(scopes, true) : null; tokP && tokP.catch(() => {});
+  if (M.health) s.fitbitPending = true;
   S.sessions.push(s); S.active = null; S.rest = null; ui.ssNext = null; save();
   ui.tab = 'history'; ui.view = s.id; render();
-  if (D.on) syncDrive(true);
+  if (!scopes.length) return;
+  (async () => {
+    if (M.health) await fbRun(s, {tokP, finish: true});
+    if (D.on) syncDrive(false);
+  })();
 }
 
 function exCard(e, ei, s, live) {
@@ -476,7 +640,8 @@ function cardioCard(s) {
       <input type="number" inputmode="numeric" data-c="hr" value="${s.cardio.hr ?? ''}" placeholder="сер. пульс"></div>
     <input data-c="note" value="${esc(s.cardio.note)}" placeholder="Що робили (доріжка, вело…)" style="margin-top:6px">
     ${strengthLine(s.fitbit?.strength)}
-    <div class="fbrow"><button data-act="fitbit">${ic('watch', '⌚')}Підтягнути з Fitbit</button><span class="fbst mut small">${s.fitbit ? 'Оновлено ' + new Date(s.fitbit.at).toLocaleTimeString('uk-UA', {hour: '2-digit', minute: '2-digit'}) : ''}</span></div></div>`;
+    ${s.end ? `<div class="fbrow">${s.fitbitPending ? `<span class="fbwait mut small">${ic('sync', '⌛')}Чекаю, поки Fitbit синхронізується…</span>` : ''}<button class="text small-btn" data-act="fitbit">${ic('refresh', '↻')}Оновити з Fitbit</button><span class="fbst mut small">${s.fitbit ? 'Оновлено ' + new Date(s.fitbit.at).toLocaleTimeString('uk-UA', {hour: '2-digit', minute: '2-digit'}) : ''}</span></div>`
+      : M.health ? `<div class="mut small fbauto">${ic('watch', '⌚')}Кардіо й силове з Fitbit підтягнуться після «Завершити тренування».</div>` : ''}</div>`;
 }
 function sessionEditor(s, live) {
   return s.exercises.map((e, i) => exCard(e, i, s, live)).join('') +
@@ -495,7 +660,7 @@ function vWorkout() {
   }
   ui.day ||= todayDay();
   const d = dayById(ui.day) || S.program[0];
-  if (!d) return '<p>Програма порожня. Додайте день у розділі «Програма».</p>';
+  if (!d) return vOnboard();
   return `<div class="days">${S.program.map(x => `<button class="${x.id === d.id ? 'on' : ''}" data-act="pickDay" data-id="${x.id}">${esc(x.short)}</button>`).join('')}</div>
     <h2>${esc(d.short)} · ${esc(d.name)}</h2>
     <div class="card">${d.exercises.map((ex, i) => { const l = lastFor(ex), [ga] = ssRange(d.exercises, i);
@@ -610,19 +775,21 @@ function vProgram() {
         <div><label>Тип</label><select data-x="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${ex.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div></div>
       <div class="chips">${(ex.type || 'reps') === 'reps' ? `<button class="chip${ex.pair ? ' on' : ''}" data-act="exPair" aria-pressed="${!!ex.pair}">${ex.pair ? '✓ ' : ''}×2 гантелі</button>` : ''}${ssBtn(d.exercises, i).replace('data-act="ssLink"', 'data-act="exLink"').replace('data-act="ssUnlink"', 'data-act="exUnlink"')}</div></div>`).join('')}
     <div class="row" style="margin-top:10px"><button data-act="exAdd">${ic('add', '+')}вправа</button><button class="danger" data-act="dayDel">${ic('delete')}Видалити день</button></div></div>`;
-  return h + syncCard() + `<h2>Резервна копія</h2><div class="card"><div class="row"><button data-act="export">${ic('download', '⬇')}Експорт JSON</button><button class="outlined" data-act="import">${ic('upload', '⬆')}Імпорт JSON</button></div>
-    <p class="mut small">Дані зберігаються лише в цьому браузері. Робіть експорт час від часу.</p>
-    <button class="danger" data-act="resetProg" style="padding-left:8px">${ic('restart_alt')}Відновити стандартну програму</button></div>`;
+  return h + accountCard() + syncCard() + fitbitCard() + `<h2>Файл</h2><div class="card"><div class="row"><button data-act="export">${ic('download', '⬇')}Експорт JSON</button><button class="outlined" data-act="import">${ic('upload', '⬆')}Імпорт JSON</button></div>
+    <p class="mut small">Дані зберігаються на цьому телефоні (окремо для кожного акаунта) і в резервній копії на твоєму Google Диску.</p>
+    <button class="danger" data-act="resetProg" style="padding-left:8px">${ic('restart_alt')}Взяти зразок 5-денної програми</button></div>`;
 }
 
 function render() {
   const y = scrollY;
+  document.body.classList.toggle('gate', !USER);
+  if (!USER) { $('#view').innerHTML = vGate(); tick(); scrollTo(0, 0); if (navigator.onLine !== false) loadGis().catch(() => {}); return; }
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab));
   const v = $('#view'); v.innerHTML = ({workout: vWorkout, history: vHistory, progress: vProgress, program: vProgram})[ui.tab]();
   if (!ui.keepScroll) { v.classList.remove('enter'); void v.offsetWidth; v.classList.add('enter'); }
   scrollTo(0, ui.keepScroll ? y : 0); ui.keepScroll = false;
   tick();
-  if (document.querySelector('[data-act=fitbit],[data-act=sync]') && navigator.onLine !== false) loadGis().catch(() => {});
+  if (navigator.onLine !== false && (D.on || M.health || document.querySelector('[data-act=fitbit],[data-act=sync],[data-act=fbConnect]'))) loadGis().catch(() => {});
 }
 const rerender = () => { ui.keepScroll = true; render(); };
 const curSession = () => ui.tab === 'workout' ? S.active : S.sessions.find(x => x.id === ui.view);
@@ -631,6 +798,7 @@ const curSession = () => ui.tab === 'workout' ? S.active : S.sessions.find(x => 
 document.addEventListener('click', ev => {
   const tab = ev.target.closest('[data-tab]');
   if (ev.target.closest('#awakeBtn')) { S.awake = !awakeOn(); save(); awakeBtn(); awakeOn() ? lockWake() : releaseWake(); return; }
+  if (!USER && !ev.target.closest('[data-act=signIn]')) return;
   if (tab) { ui.tab = tab.dataset.tab; ui.view = null; render(); return; }
   const b = ev.target.closest('[data-act]'); if (!b || b.tagName === 'SELECT' || b.tagName === 'INPUT') return;
   const act = b.dataset.act, card = b.closest('[data-ei]'), s = curSession();
@@ -687,7 +855,15 @@ document.addEventListener('click', ev => {
       document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     },
     import() { $('#importFile').click(); },
-    fitbit() { if (s) importFitbit(s, b); },
+    fitbit() { if (s && s.end) fbRun(s, {interactive: true, btn: b}); },
+    signIn() { signIn(!!$('#gateHealth')?.checked); },
+    signOut() { signOut(); },
+    obCreate() { const d = {id: uid(), wd: new Date().getDay(), short: 'Д1', name: 'Мій день', cardio: '', exercises: []}; S.program.push(d); S.setup = true; ui.tab = 'program'; ui.editDay = d.id; save(); render(); scheduleSync(); },
+    obSample() { S.program = defaultProgram(); S.setup = true; ui.day = null; save(); render(); scheduleSync(); toast('Зразок програми додано — змінюй його у вкладці «Програма».'); },
+    fbConnect() { const p = tokenFor(['health'], true); b.disabled = true;
+      p.then(() => { M.health = true; saveM(); rerender(); toast('Fitbit підключено. Після «Завершити тренування» кардіо й силове підтягнуться самі.'); retryFitbit(true); },
+        e => { b.disabled = false; toast(e.code === 'denied' ? FB_ERR.denied : FB_ERR[e.code] || gateMsg(e), true); }); },
+    fbDisconnect() { M.health = false; saveM(); rerender(); },
     sync() { syncDrive(true); syncUi(); },
     syncLogin() { $('#toast').hidden = true; syncDrive(true); },
     syncToggle() { if (D.on) { D.on = false; D.pending = false; D.err = ''; clearTimeout(drTimer); saveD(); rerender(); } else syncDrive(true).then(() => rerender()); syncUi(); },
@@ -696,7 +872,7 @@ document.addEventListener('click', ev => {
   A[act]?.();
   if (A[act] && !NO_SYNC.has(act) && (ui.tab === 'program' || (ui.tab === 'history' && act !== 'open' && act !== 'back'))) scheduleSync();
 });
-const NO_SYNC = new Set(['open', 'back', 'editDay', 'export', 'import', 'pickDay', 'sync', 'syncLogin', 'syncToggle', 'restAdd', 'restSkip', 'fitbit', 'start', 'finish', 'cancel']);
+const NO_SYNC = new Set(['open', 'back', 'editDay', 'export', 'import', 'pickDay', 'sync', 'syncLogin', 'syncToggle', 'restAdd', 'restSkip', 'fitbit', 'start', 'finish', 'cancel', 'signIn', 'signOut', 'fbConnect', 'fbDisconnect', 'obCreate']);
 
 // Введення значень: зберігаємо без перерендеру, щоб не збивати фокус.
 document.addEventListener('input', ev => {
@@ -747,8 +923,13 @@ document.addEventListener('pointerdown', ev => {
   b.appendChild(sp); setTimeout(() => sp.remove(), 600);
 }, {passive: true});
 
+if (USER) { try { M = JSON.parse(localStorage.getItem(ACCT + USER.email)) || {}; } catch (e) { M = {}; }
+  try { D = JSON.parse(localStorage.getItem(DRV + USER.email)) || {on: true}; } catch (e) { D = {on: true}; } }
 render(); awakeBtn(); lockWake();
 // Відкладена синхронізація: якщо токен ще живий — одразу, інакше пропонуємо увійти (вікно Google — лише після натискання).
-if (D.on && D.pending) { if (drSaved()) syncDrive(false); else setTimeout(() => { if (D.pending && !drBusy && !drSaved()) snack('Зміни ще не на Google Drive: увійди для синхронізації.', 'Увійти'); }, 600); }
-addEventListener('online', () => { if (D.on && D.pending && drSaved()) syncDrive(false); });
+if (USER && D.on && D.pending) { if (drSaved()) syncDrive(false); else setTimeout(() => { if (D.pending && !drBusy && !drSaved()) snack('Зміни ще не на Google Drive: увійди для синхронізації.', 'Увійти'); }, 600); }
+retryFitbit(true);
+addEventListener('online', () => { if (D.on && D.pending && drSaved()) syncDrive(false); retryFitbit(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) retryFitbit(); });
+setInterval(() => retryFitbit(), 120000);
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('service-worker.js').catch(() => {});

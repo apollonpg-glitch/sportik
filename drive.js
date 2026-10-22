@@ -29,6 +29,17 @@
     const j = await call(fetchFn, `${API}?spaces=drive&orderBy=modifiedTime desc&pageSize=10&fields=files(id,name,modifiedTime)&q=${encodeURIComponent(q)}`, token);
     return (j.files && j.files[0] && j.files[0].id) || null;
   }
+  // Остання копія користувача: {id, modifiedTime} або null.
+  async function findMeta(token, fetchFn) {
+    fetchFn = fetchFn || root.fetch.bind(root);
+    const q = `name='${NAME}' and trashed=false`;
+    const j = await call(fetchFn, `${API}?spaces=drive&orderBy=modifiedTime desc&pageSize=10&fields=files(id,name,modifiedTime)&q=${encodeURIComponent(q)}`, token);
+    return (j.files && j.files[0]) || null;
+  }
+  async function download(token, id, fetchFn) {
+    fetchFn = fetchFn || root.fetch.bind(root);
+    return call(fetchFn, `${API}/${encodeURIComponent(id)}?alt=media`, token);
+  }
   async function create(token, text, fetchFn) {
     const b = 'sportik' + Math.random().toString(36).slice(2);
     const meta = JSON.stringify({name: NAME, mimeType: 'application/json', description: 'Спортік: програма та тренування (автосинхронізація)'});
@@ -42,9 +53,11 @@
     return j.id || id;
   }
   // Записує payload у sportik-data.json. Повертає fileId (зберегти й передавати наступного разу).
-  async function upload(token, payload, fileId, fetchFn) {
+  // opts.fresh — завжди новий файл (стару копію на Диску не чіпаємо).
+  async function upload(token, payload, fileId, fetchFn, opts) {
     fetchFn = fetchFn || root.fetch.bind(root);
     const text = JSON.stringify(payload, null, 1);
+    if (opts && opts.fresh) return create(token, text, fetchFn);
     if (fileId) {
       try { return await update(token, fileId, text, fetchFn); }
       catch (e) { if (e.code !== 'notfound') throw e; }
@@ -53,6 +66,6 @@
     if (found && found !== fileId) return update(token, found, text, fetchFn);
     return create(token, text, fetchFn);
   }
-  const api = {upload, find, NAME, DriveError};
+  const api = {upload, find, findMeta, download, NAME, DriveError};
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.DriveSync = api;
 })(typeof self !== 'undefined' ? self : globalThis);
