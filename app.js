@@ -19,7 +19,10 @@ const TYPES = {
   min:  {name: 'Хвилини', a: 'хв', b: 'пульс'},
 };
 
-const E = (name, sets, reps, rest, type = 'reps') => ({id: uid(), name, sets, reps, rest, type});
+// Гантелі ×2: вводиться вага ОДНІЄЇ гантелі, тоннаж рахується з обох.
+const ONE_DB = /(одн(ією|ієї|ій|у|а|ою)\s+(рук|гантел)|однорук|по\s+одн)/i;
+const autoPair = n => /гантел/i.test(n || '') && !ONE_DB.test(n || '');
+const E = (name, sets, reps, rest, type = 'reps', o = {}) => ({id: uid(), name, sets, reps, rest, type, pair: type === 'reps' && autoPair(name), ...o});
 function defaultProgram() {
   return [
     {id: 'd1', wd: 1, short: 'Пн', name: 'Верх тіла, сила', cardio: '35 хв зона 2, доріжка під нахилом 6–10%', exercises: [
@@ -38,7 +41,7 @@ function defaultProgram() {
       E('Жим гантелей на похилій лавці', 4, '8–10', 90), E('Тяга верхнього блоку', 4, '10–12', 90),
       E('Тяга однією рукою в тренажері', 3, '10/рука', 60), E('Жим у тренажері для грудей, нейтральний хват', 3, '10–12', 60),
       E('Жим у тренажері для плечей', 3, '10–12', 60), E('Махи гантелями в сторони', 4, '12–15', 45),
-      E('Суперсет: біцепс гантелі + трицепс на блоці', 3, '12+12', 60)]},
+      E('Згинання рук з гантелями на біцепс', 3, '12', 60, 'reps', {ss: 'A'}), E('Розгинання рук на блоці (трицепс)', 3, '12', 60, 'reps', {ss: 'A'})]},
     {id: 'd5', wd: 5, short: 'Пт', name: "Низ тіла, об'єм", cardio: 'Кругове 20 хв (40/20)', exercises: [
       E('Румунська тяга', 4, '8', 120), E('Гоблет-присідання', 4, '10–12', 90),
       E('Жим ногами вузько', 3, '12–15', 90), E('Ягідний міст зі штангою', 3, '10–12', 90),
@@ -46,12 +49,77 @@ function defaultProgram() {
   ];
 }
 
-// ---------- стан ----------
+// ---------- суперсети: вправи з однаковим ss, що стоять поспіль ----------
+function newSS(list) { const used = new Set(list.map(x => x.ss).filter(Boolean));
+  for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') if (!used.has(c)) return c; return 'S' + uid().slice(0, 4); }
+// Групи — лише суміжні; одиночні знімаються, повторні id перейменовуються.
+function normSS(list) {
+  const seen = new Set();
+  for (let i = 0; i < list.length;) {
+    const id = list[i].ss; if (!id) { delete list[i].ss; i++; continue; }
+    let j = i; while (j + 1 < list.length && list[j + 1].ss === id) j++;
+    if (j === i) delete list[i].ss;
+    else { let nid = id; if (seen.has(id)) { nid = newSS(list); for (let k = i; k <= j; k++) list[k].ss = nid; } seen.add(nid); }
+    i = j + 1;
+  }
+  return list;
+}
+const linkedNext = (list, i) => !!(list[i]?.ss && list[i + 1]?.ss === list[i].ss);
+function ssRange(list, i) { let a = i, b = i; if (!list[i]?.ss) return [i, i];
+  while (a > 0 && list[a - 1].ss === list[i].ss) a--; while (b + 1 < list.length && list[b + 1].ss === list[i].ss) b++; return [a, b]; }
+function ssLink(list, i) {
+  const a = list[i], b = list[i + 1]; if (!a || !b) return;
+  const id = a.ss || b.ss || newSS(list), old = b.ss;
+  a.ss = id; b.ss = id; if (old && old !== id) for (let k = i + 2; k < list.length && list[k].ss === old; k++) list[k].ss = id;
+  normSS(list);
+}
+function ssUnlink(list, i) {
+  const id = list[i]?.ss; if (!id) return; const nid = newSS(list);
+  for (let k = i + 1; k < list.length && list[k].ss === id; k++) list[k].ss = nid;
+  normSS(list);
+}
+const ssRest = (list, i) => { const [a, b] = ssRange(list, i); return Math.max(0, ...list.slice(a, b + 1).map(x => +x.rest || 0)); };
+
+// ---------- стан і міграції ----------
+const SCHEMA = 2;
+const cap = t => t ? t[0].toUpperCase() + t.slice(1) : t;
+const SS_NAMES = {'біцепс гантелі': 'Згинання рук з гантелями на біцепс', 'біцепс з гантелями': 'Згинання рук з гантелями на біцепс', 'трицепс на блоці': 'Розгинання рук на блоці (трицепс)'};
+// v1 -> v2: прапорець ×2 для гантелей; «Суперсет: X + Y» у програмі -> дві пов'язані вправи. Історію не переписуємо.
+function migrate(st) {
+  if (!st || !Array.isArray(st.program)) return st;
+  const v = st.v || 1;
+  for (const d of st.program) {
+    d.exercises ||= [];
+    if (v < 2) {
+      const out = [];
+      for (const ex of d.exercises) {
+        const m = /^\s*суперсет\s*:\s*(.+?)\s*\+\s*(.+?)\s*$/i.exec(ex.name || '');
+        if (!m) { out.push(ex); continue; }
+        const rp = String(ex.reps ?? '').split('+').map(x => x.trim()), id = newSS(d.exercises.concat(out));
+        [m[1], m[2]].forEach((part, k) => {
+          const name = SS_NAMES[part.toLowerCase()] || cap(part);
+          out.push({id: k ? uid() : ex.id || uid(), name, sets: ex.sets, reps: rp[k] || rp[0] || '', rest: ex.rest, type: ex.type || 'reps', pair: autoPair(name), ss: id});
+        });
+      }
+      d.exercises = out;
+    }
+    for (const ex of d.exercises) if (ex.pair === undefined) ex.pair = (ex.type || 'reps') === 'reps' && autoPair(ex.name);
+    normSS(d.exercises);
+  }
+  if (st.active && Array.isArray(st.active.exercises))
+    for (const e of st.active.exercises) if (e.pair === undefined) e.pair = (e.type || 'reps') === 'reps' && autoPair(e.name);
+  st.v = SCHEMA;
+  return st;
+}
 let S;
 function load() {
   try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
-  if (!S || !Array.isArray(S.program)) S = {program: defaultProgram(), sessions: [], active: null, rest: null};
+  if (!S || !Array.isArray(S.program)) S = {v: SCHEMA, program: defaultProgram(), sessions: [], active: null, rest: null};
   S.sessions ||= []; S.active ??= null; S.rest ??= null;
+  if ((S.v || 1) < SCHEMA) {
+    try { localStorage.setItem(KEY + '.backup-v' + (S.v || 1), localStorage.getItem(KEY) || ''); } catch (e) {}
+    migrate(S); save();
+  }
 }
 function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
 load();
@@ -64,7 +132,7 @@ function lastFor(ex, excludeId) {
   for (let i = S.sessions.length - 1; i >= 0; i--) {
     const s = S.sessions[i]; if (s.id === excludeId) continue;
     const e = s.exercises.find(x => sameEx(x, ex) && x.sets.some(t => t.done));
-    if (e) return {date: s.start, sets: e.sets.filter(t => t.done)};
+    if (e) return {date: s.start, sets: e.sets.filter(t => t.done), pair: e.pair};
   }
   return null;
 }
@@ -72,7 +140,7 @@ const firstNum = t => { const m = String(t).match(/\d+([.,]\d+)?/); return m ? n
 function sessionVolume(s) {
   let v = 0;
   for (const e of s.exercises) if ((e.type || 'reps') === 'reps')
-    for (const t of e.sets) if (t.done && t.w && t.r) v += t.w * t.r;
+    for (const t of e.sets) if (t.done && t.w && t.r) v += t.w * t.r * (e.pair ? 2 : 1);
   return Math.round(v);
 }
 const e1rm = (w, r) => r <= 1 ? w : w * (1 + r / 30);
@@ -240,36 +308,61 @@ function newSession(day) {
         const p = last && (last.sets[i] || last.sets[last.sets.length - 1]);
         return {w: p ? p.w : null, r: p ? p.r : null, done: false};
       });
-      return {exId: ex.id, name: ex.name, type: ex.type || 'reps', target: `${ex.sets}×${ex.reps}`, targetReps: ex.reps, rest: ex.rest, notes: '', sets};
+      const pair = ex.pair ?? (last ? last.pair : undefined) ?? autoPair(ex.name);
+      const o = {exId: ex.id, name: ex.name, type: ex.type || 'reps', target: `${ex.sets}×${ex.reps}`, targetReps: ex.reps, rest: ex.rest, pair: (ex.type || 'reps') === 'reps' && !!pair, notes: '', sets};
+      if (ex.ss) o.ss = ex.ss;
+      return o;
     })};
+}
+// Після підходу: у суперсеті — до того ж підходу наступної вправи без відпочинку; відпочинок — коли коло завершене.
+function afterSetDone(s, ei, si) {
+  const L = s.exercises, e = L[ei]; ui.ssNext = null;
+  if (!e.ss) return startRest(e.rest, e.name);
+  const [a, b] = ssRange(L, ei), order = [];
+  for (let k = ei + 1; k <= b; k++) order.push(k); for (let k = a; k < ei; k++) order.push(k);
+  const nxt = order.find(k => L[k].sets[si] && !L[k].sets[si].done);
+  if (nxt != null) { ui.ssNext = {sid: s.id, ei: nxt, si, scroll: true}; return; }
+  startRest(ssRest(L, ei), 'суперсет · ' + L.slice(a, b + 1).map(x => x.name).join(' + '));
 }
 function finishSession() {
   const s = S.active; if (!s) return;
   s.end = Date.now(); s.duration = Math.round((s.end - s.start) / 1000);
   s.exercises.forEach(e => e.sets = e.sets.filter(t => t.done || t.w != null || t.r != null));
   s.volume = sessionVolume(s);
-  S.sessions.push(s); S.active = null; S.rest = null; save();
+  S.sessions.push(s); S.active = null; S.rest = null; ui.ssNext = null; save();
   ui.tab = 'history'; ui.view = s.id; render();
 }
 
 function exCard(e, ei, s, live) {
-  const T = TYPES[e.type] || TYPES.reps;
+  const T = TYPES[e.type] || TYPES.reps, L = s.exercises, isReps = (e.type || 'reps') === 'reps';
+  const inSS = !!e.ss, [ga, gb] = ssRange(L, ei), first = inSS && ga === ei, lastM = inSS && gb === ei;
+  const nx = ui.ssNext && ui.ssNext.sid === s.id && ui.ssNext.ei === ei ? ui.ssNext.si : -1;
   const last = lastFor(e, s.id);
   const hint = last ? `Минулого разу (${fmtDate(last.date)}): ${last.sets.map(t => setStr(t, e.type)).join(', ')}` : 'Ще немає історії';
   const tn = firstNum(e.targetReps) ?? '', isMin = e.type === 'min';
   const phA = isMin ? tn : T.a, phB = isMin ? T.b : tn;
-  return `<div class="card" data-ei="${ei}">
-    <div class="row between"><h3>${esc(e.name)}</h3><span class="tgt">${esc(e.target || '')}${e.rest ? ' · ' + e.rest + 'с' : ''}</span></div>
+  const restTxt = inSS && !lastM ? ' · → далі' : (inSS ? ssRest(L, ei) : e.rest) ? ' · ' + (inSS ? ssRest(L, ei) : e.rest) + 'с' : '';
+  const ssCls = inSS ? ` ss${first ? ' ss-first' : ''}${lastM ? ' ss-last' : ''}` : '';
+  return `<div class="card${ssCls}" data-ei="${ei}">
+    ${first ? `<div class="sslbl">${ic('link', '🔗')}Суперсет · відпочинок після кола</div>` : ''}
+    <div class="row between" style="flex-wrap:nowrap;align-items:flex-start"><h3>${inSS ? `<span class="ssn">${ei - ga + 1}</span>` : ''}${esc(e.name)}</h3><span class="tgt" style="white-space:nowrap">${esc(e.target || '')}${restTxt}</span></div>
+    ${isReps ? `<div class="chips"><button class="chip${e.pair ? ' on' : ''}" data-act="pair" aria-pressed="${!!e.pair}" title="Вводь вагу однієї гантелі; тоннаж рахується з двох">${e.pair ? '✓ ' : ''}×2 гантелі</button></div>` : ''}
     <div class="hint">${esc(hint)}</div>
-    <div class="lbls"><span>#</span><span>${T.a}</span><span>${T.b}</span><span></span></div>
-    ${e.sets.map((t, si) => `<div class="set ${t.done ? 'done' : ''}" data-si="${si}">
+    <div class="lbls"><span>#</span><span>${isReps && e.pair ? 'кг (1 гант.)' : T.a}</span><span>${T.b}</span><span></span></div>
+    ${e.sets.map((t, si) => `<div class="set ${t.done ? 'done' : ''}${si === nx && !t.done ? ' next' : ''}" data-si="${si}">
       <span class="n">${si + 1}</span>
       <input type="number" inputmode="decimal" step="any" data-f="w" value="${t.w ?? ''}" placeholder="${phA}">
       <input type="number" inputmode="decimal" step="any" data-f="r" value="${t.r ?? ''}" placeholder="${phB}">
       <button class="chk" data-act="done" aria-label="Підхід виконано" aria-pressed="${t.done}"><svg viewBox="0 0 18 18"><path d="M3 9.5l4 4 8-9"/></svg></button></div>`).join('')}
     <div class="row"><button data-act="addSet">${ic('add', '+')}підхід</button><button class="outlined" data-act="delSet" ${e.sets.length ? '' : 'disabled'}>${ic('remove', '−')}підхід</button>
       <button class="icon danger" data-act="delEx" aria-label="Видалити вправу" title="Видалити вправу">${ic('delete', '✕')}</button></div>
+    ${live ? ssBtn(L, ei) : ''}
     <textarea data-f="notes" placeholder="Нотатки до вправи">${esc(e.notes)}</textarea></div>`;
+}
+function ssBtn(L, i) {
+  if (linkedNext(L, i)) return `<button class="text sslink" data-act="ssUnlink">${ic('link_off', '⛓')}Роз'єднати</button>`;
+  if (i < L.length - 1) return `<button class="text sslink" data-act="ssLink">${ic('add_link', '🔗')}Об'єднати в суперсет з наступною</button>`;
+  return '';
 }
 function cardioCard(s) {
   const fc = s.fitbit?.cardio, fromFb = fc && +s.cardio.min === fc.min;
@@ -301,8 +394,8 @@ function vWorkout() {
   if (!d) return '<p>Програма порожня. Додайте день у розділі «Програма».</p>';
   return `<div class="days">${S.program.map(x => `<button class="${x.id === d.id ? 'on' : ''}" data-act="pickDay" data-id="${x.id}">${esc(x.short)}</button>`).join('')}</div>
     <h2>${esc(d.short)} · ${esc(d.name)}</h2>
-    <div class="card">${d.exercises.map(ex => { const l = lastFor(ex);
-      return `<div class="preview-row"><span>${esc(ex.name)}</span><span class="tgt">${ex.sets}×${esc(ex.reps)}${l ? ' · ' + esc(setStr(l.sets[0], ex.type)) : ''}</span></div>`; }).join('')}
+    <div class="card">${d.exercises.map((ex, i) => { const l = lastFor(ex), [ga] = ssRange(d.exercises, i);
+      return `${ex.ss && ga === i ? `<div class="sslbl mini">${ic('link', '🔗')}Суперсет</div>` : ''}<div class="preview-row${ex.ss ? ' ssp' : ''}"><span>${esc(ex.name)}${ex.pair ? ' <span class="x2">×2</span>' : ''}</span><span class="tgt">${ex.sets}×${esc(ex.reps)}${l ? ' · ' + esc(setStr(l.sets[0], ex.type)) : ''}</span></div>`; }).join('')}
       ${d.cardio ? `<div class="tgt" style="margin-top:8px">Кардіо: ${esc(d.cardio)}</div>` : ''}</div>
     <button class="fab" data-act="start">${ic('play_arrow', '▶')}Почати тренування</button>`;
 }
@@ -403,13 +496,15 @@ function vProgram() {
       <div><label>Назва дня</label><input data-d="name" value="${esc(d.name)}"></div>
       <div><label>День тижня</label><select data-d="wd">${['—', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'].map((n, i) => `<option value="${i === 7 ? 0 : i === 0 ? -1 : i}" ${d.wd === (i === 7 ? 0 : i === 0 ? -1 : i) ? 'selected' : ''}>${n}</option>`).join('')}</select></div></div>
       <div><label>Кардіо (ціль)</label><input data-d="cardio" value="${esc(d.cardio)}"></div></div>
-    ${d.exercises.map((ex, i) => `<div class="pe" data-xi="${i}">
+    ${d.exercises.map((ex, i) => `<div class="pe${ex.ss ? ' ssp' : ''}${linkedNext(d.exercises, i) ? ' ssj' : ''}" data-xi="${i}">
+      ${ex.ss && ssRange(d.exercises, i)[0] === i ? `<div class="sslbl mini">${ic('link', '🔗')}Суперсет · відпочинок після кола ${ssRest(d.exercises, i)}с</div>` : ''}
       <div class="row" style="flex-wrap:nowrap"><input data-x="name" value="${esc(ex.name)}">
         <button class="icon" data-act="exUp" aria-label="Вгору">${ic('arrow_upward', '↑')}</button><button class="icon danger" data-act="exDel" aria-label="Видалити">${ic('close', '✕')}</button></div>
       <div class="g" style="grid-template-columns:1fr 1fr 1fr 1.4fr"><div><label>Підходи</label><input type="number" data-x="sets" value="${ex.sets}"></div>
         <div><label>Повтори</label><input data-x="reps" value="${esc(ex.reps)}"></div>
         <div><label>Відпоч., с</label><input type="number" data-x="rest" value="${ex.rest}"></div>
-        <div><label>Тип</label><select data-x="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${ex.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div></div></div>`).join('')}
+        <div><label>Тип</label><select data-x="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${ex.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div></div>
+      <div class="chips">${(ex.type || 'reps') === 'reps' ? `<button class="chip${ex.pair ? ' on' : ''}" data-act="exPair" aria-pressed="${!!ex.pair}">${ex.pair ? '✓ ' : ''}×2 гантелі</button>` : ''}${ssBtn(d.exercises, i).replace('data-act="ssLink"', 'data-act="exLink"').replace('data-act="ssUnlink"', 'data-act="exUnlink"')}</div></div>`).join('')}
     <div class="row" style="margin-top:10px"><button data-act="exAdd">${ic('add', '+')}вправа</button><button class="danger" data-act="dayDel">${ic('delete')}Видалити день</button></div></div>`;
   return h + `<h2>Резервна копія</h2><div class="card"><div class="row"><button data-act="export">${ic('download', '⬇')}Експорт JSON</button><button class="outlined" data-act="import">${ic('upload', '⬆')}Імпорт JSON</button></div>
     <p class="mut small">Дані зберігаються лише в цьому браузері. Робіть експорт час від часу.</p>
@@ -438,7 +533,7 @@ document.addEventListener('click', ev => {
   const e = card && s ? s.exercises[+card.dataset.ei] : null;
   const A = {
     pickDay() { ui.day = b.dataset.id; render(); },
-    start() { const d = dayById(ui.day); if (!d) return; unlockAudio(); S.active = newSession(d); save(); lockWake(); render(); },
+    start() { const d = dayById(ui.day); if (!d) return; unlockAudio(); S.active = newSession(d); ui.ssNext = null; save(); lockWake(); render(); },
     done() {
       unlockAudio();
       const row = b.closest('[data-si]'), t = e.sets[+row.dataset.si];
@@ -446,21 +541,31 @@ document.addEventListener('click', ev => {
         if (e.type === 'min') { if (t.w == null) t.w = firstNum(e.targetReps); }
         else if (t.r == null) t.r = firstNum(e.targetReps);
         t.done = true; save();
-        if (ui.tab === 'workout') startRest(e.rest, e.name);
+        if (ui.tab === 'workout') afterSetDone(s, +card.dataset.ei, +row.dataset.si);
       } else { t.done = false; save(); }
       rerender();
+      if (ui.ssNext && ui.ssNext.scroll) { ui.ssNext.scroll = false;
+        const el = document.querySelector(`[data-ei="${ui.ssNext.ei}"] [data-si="${ui.ssNext.si}"]`);
+        el && el.scrollIntoView({block: 'center', behavior: reduceMotion.matches ? 'auto' : 'smooth'}); }
     },
+    pair() { e.pair = !e.pair; if (s.end) s.volume = sessionVolume(s); save(); rerender(); },
+    ssLink() { ssLink(s.exercises, +card.dataset.ei); save(); rerender(); },
+    ssUnlink() { ssUnlink(s.exercises, +card.dataset.ei); save(); rerender(); },
+    exPair() { const ex = dayById(ui.editDay).exercises[+b.closest('[data-xi]').dataset.xi]; ex.pair = !ex.pair; save(); rerender(); },
+    exLink() { ssLink(dayById(ui.editDay).exercises, +b.closest('[data-xi]').dataset.xi); save(); rerender(); },
+    exUnlink() { ssUnlink(dayById(ui.editDay).exercises, +b.closest('[data-xi]').dataset.xi); save(); rerender(); },
     addSet() { const p = e.sets[e.sets.length - 1]; e.sets.push({w: p ? p.w : null, r: p ? p.r : null, done: false}); save(); rerender(); },
     delSet() { e.sets.pop(); save(); rerender(); },
-    delEx() { if (confirm('Видалити вправу з цього тренування?')) { s.exercises.splice(+card.dataset.ei, 1); save(); rerender(); } },
+    delEx() { if (confirm('Видалити вправу з цього тренування?')) { s.exercises.splice(+card.dataset.ei, 1); normSS(s.exercises); ui.ssNext = null; save(); rerender(); } },
     addEx() { const n = $('#newExName').value.trim(); if (!n) return;
-      s.exercises.push({exId: null, name: n, type: 'reps', target: '', targetReps: '', rest: 90, notes: '', sets: [{w: null, r: null, done: false}]}); save(); rerender(); },
+      const x = {exId: null, name: n}, l = lastFor(x, s.id);
+      s.exercises.push({exId: null, name: n, type: 'reps', target: '', targetReps: '', rest: 90, pair: l && l.pair !== undefined ? !!l.pair : autoPair(n), notes: '', sets: [{w: null, r: null, done: false}]}); save(); rerender(); },
     finish() {
       const n = S.active.exercises.reduce((a, x) => a + x.sets.filter(t => t.done).length, 0);
       if (!n && !S.active.cardio.min && !confirm('Жодного виконаного підходу. Все одно завершити?')) return;
       finishSession();
     },
-    cancel() { if (confirm('Скасувати тренування? Дані цієї сесії буде втрачено.')) { S.active = null; S.rest = null; save(); render(); } },
+    cancel() { if (confirm('Скасувати тренування? Дані цієї сесії буде втрачено.')) { S.active = null; S.rest = null; ui.ssNext = null; save(); render(); } },
     restAdd() { if (S.rest) { S.rest.endAt = Math.max(Date.now(), S.rest.endAt) + (+b.dataset.v) * 1000; S.rest.dur = Math.max(S.rest.dur || 0, (S.rest.endAt - Date.now()) / 1000); restAlerted = false; save(); tick(); } },
     restSkip() { S.rest = null; save(); tick(); },
     open() { ui.view = b.dataset.id; render(); },
@@ -470,10 +575,10 @@ document.addEventListener('click', ev => {
     addDay() { const d = {id: uid(), wd: -1, short: 'Д' + (S.program.length + 1), name: 'Новий день', cardio: '', exercises: []}; S.program.push(d); ui.editDay = d.id; save(); render(); },
     dayDel() { if (confirm('Видалити цей день з програми? Історія залишиться.')) { S.program = S.program.filter(x => x.id !== ui.editDay); ui.editDay = null; ui.day = null; save(); render(); } },
     exAdd() { dayById(ui.editDay).exercises.push(E('Нова вправа', 3, '10', 60)); save(); rerender(); },
-    exDel() { const d = dayById(ui.editDay), i = +b.closest('[data-xi]').dataset.xi; if (confirm(`Видалити «${d.exercises[i].name}»?`)) { d.exercises.splice(i, 1); save(); rerender(); } },
-    exUp() { const d = dayById(ui.editDay), i = +b.closest('[data-xi]').dataset.xi; if (i > 0) { [d.exercises[i - 1], d.exercises[i]] = [d.exercises[i], d.exercises[i - 1]]; save(); rerender(); } },
+    exDel() { const d = dayById(ui.editDay), i = +b.closest('[data-xi]').dataset.xi; if (confirm(`Видалити «${d.exercises[i].name}»?`)) { d.exercises.splice(i, 1); normSS(d.exercises); save(); rerender(); } },
+    exUp() { const d = dayById(ui.editDay), i = +b.closest('[data-xi]').dataset.xi; if (i > 0) { [d.exercises[i - 1], d.exercises[i]] = [d.exercises[i], d.exercises[i - 1]]; normSS(d.exercises); save(); rerender(); } },
     export() {
-      const blob = new Blob([JSON.stringify({app: 'sportik', version: 1, exported: new Date().toISOString(), program: S.program, sessions: S.sessions}, null, 1)], {type: 'application/json'});
+      const blob = new Blob([JSON.stringify({app: 'sportik', version: SCHEMA, exported: new Date().toISOString(), program: S.program, sessions: S.sessions}, null, 1)], {type: 'application/json'});
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `sportik-${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     },
@@ -513,6 +618,7 @@ $('#importFile').addEventListener('change', async ev => {
     const d = JSON.parse(await f.text());
     if (!Array.isArray(d.program) || !Array.isArray(d.sessions)) throw new Error('format');
     if (!confirm(`Імпортувати ${d.sessions.length} тренувань і програму з ${d.program.length} днів? Поточні дані буде замінено.`)) return;
+    migrate({v: d.version || 1, program: d.program});
     S.program = d.program; S.sessions = d.sessions.sort((a, b) => a.start - b.start); save(); ui = {tab: 'history'}; render();
     toast('Імпорт виконано');
   } catch (e) { toast('Не вдалося прочитати файл: це не резервна копія Спортіка.', true); }
