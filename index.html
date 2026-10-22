@@ -3,13 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f172a">
+<meta name="theme-color" content="#F5FBF5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0F1512" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Спортік — трекер тренувань</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wdth,wght@8..144,25..151,100..1000&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400..700,0..1,0&display=block">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -20,8 +25,10 @@
 </header>
 <main id="view"></main>
 <div id="rest" hidden>
+  <div class="handle"></div>
   <div class="rest-name" id="restName"></div>
   <div class="rest-time" id="restTime">0:00</div>
+  <div class="rest-prog"><div id="restBar"></div></div>
   <div class="rest-btns">
     <button data-act="restAdd" data-v="-15">−15с</button>
     <button data-act="restAdd" data-v="15">+15с</button>
@@ -29,10 +36,10 @@
   </div>
 </div>
 <nav id="tabs">
-  <button data-tab="workout">🏋️<span>Тренування</span></button>
-  <button data-tab="history">📅<span>Історія</span></button>
-  <button data-tab="progress">📈<span>Прогрес</span></button>
-  <button data-tab="program">⚙️<span>Програма</span></button>
+  <button data-tab="workout"><i><span class="ms" aria-hidden="true">fitness_center</span><span class="em" aria-hidden="true">🏋️</span></i><span>Тренування</span></button>
+  <button data-tab="history"><i><span class="ms" aria-hidden="true">calendar_month</span><span class="em" aria-hidden="true">📅</span></i><span>Історія</span></button>
+  <button data-tab="progress"><i><span class="ms" aria-hidden="true">monitoring</span><span class="em" aria-hidden="true">📈</span></i><span>Прогрес</span></button>
+  <button data-tab="program"><i><span class="ms" aria-hidden="true">tune</span><span class="em" aria-hidden="true">⚙️</span></i><span>Програма</span></button>
 </nav>
 <input type="file" id="importFile" accept="application/json,.json" hidden>
 <script src="fitbit.js"></script>

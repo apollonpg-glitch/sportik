@@ -7,6 +7,7 @@ const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(
 const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) ? n : null; };
 const fmtDur = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
   return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+const ic = (n, e = '') => `<span class="ms" aria-hidden="true">${n}</span>${e ? `<span class="em" aria-hidden="true">${e}</span>` : ''}`;
 const fmtDate = t => new Date(t).toLocaleDateString('uk-UA', {day: '2-digit', month: '2-digit', year: '2-digit'});
 const fmtDateLong = t => new Date(t).toLocaleDateString('uk-UA', {weekday: 'short', day: 'numeric', month: 'long'});
 
@@ -116,7 +117,7 @@ document.addEventListener('pointerdown', () => { if (awakeOn() && !wakeLock) loc
 let restAlerted = false;
 function startRest(sec, name) {
   if (!sec) return;
-  S.rest = {endAt: Date.now() + sec * 1000, name}; restAlerted = false; save(); tick();
+  S.rest = {endAt: Date.now() + sec * 1000, name, dur: sec}; restAlerted = false; save(); tick();
 }
 function tick() {
   const box = $('#rest');
@@ -125,12 +126,14 @@ function tick() {
     box.hidden = false; $('#restName').textContent = 'Відпочинок · ' + S.rest.name;
     $('#restTime').textContent = left > 0 ? fmtDur(Math.ceil(left)) : 'Час!';
     box.classList.toggle('over', left <= 0);
+    const tot = Math.max(S.rest.dur || 0, left, 1); $('#restBar').style.transform = `scaleX(${Math.max(0, Math.min(1, left / tot))})`;
     if (left <= 0 && !restAlerted) {
       restAlerted = true;
       if (left > -5) { navigator.vibrate?.([300, 150, 300, 150, 500]); beep(); }
       setTimeout(() => { if (S.rest && S.rest.endAt <= Date.now()) { S.rest = null; save(); tick(); } }, 4000);
     }
   } else box.hidden = true;
+  document.body.classList.toggle('resting', !!S.rest);
   const c = $('#sessionClock');
   if (S.active) { c.hidden = false; c.textContent = '⏱ ' + fmtDur((Date.now() - S.active.start) / 1000); } else c.hidden = true;
 }
@@ -263,9 +266,9 @@ function exCard(e, ei, s, live) {
       <span class="n">${si + 1}</span>
       <input type="number" inputmode="decimal" step="any" data-f="w" value="${t.w ?? ''}" placeholder="${phA}">
       <input type="number" inputmode="decimal" step="any" data-f="r" value="${t.r ?? ''}" placeholder="${phB}">
-      <button class="chk" data-act="done" aria-label="Підхід виконано">✓</button></div>`).join('')}
-    <div class="row"><button data-act="addSet">+ підхід</button><button data-act="delSet" ${e.sets.length ? '' : 'disabled'}>− підхід</button>
-      <button class="danger" data-act="delEx">Видалити вправу</button></div>
+      <button class="chk" data-act="done" aria-label="Підхід виконано" aria-pressed="${t.done}"><svg viewBox="0 0 18 18"><path d="M3 9.5l4 4 8-9"/></svg></button></div>`).join('')}
+    <div class="row"><button data-act="addSet">${ic('add', '+')}підхід</button><button class="outlined" data-act="delSet" ${e.sets.length ? '' : 'disabled'}>${ic('remove', '−')}підхід</button>
+      <button class="icon danger" data-act="delEx" aria-label="Видалити вправу" title="Видалити вправу">${ic('delete', '✕')}</button></div>
     <textarea data-f="notes" placeholder="Нотатки до вправи">${esc(e.notes)}</textarea></div>`;
 }
 function cardioCard(s) {
@@ -276,11 +279,11 @@ function cardioCard(s) {
       <input type="number" inputmode="numeric" data-c="hr" value="${s.cardio.hr ?? ''}" placeholder="сер. пульс"></div>
     <input data-c="note" value="${esc(s.cardio.note)}" placeholder="Що робили (доріжка, вело…)" style="margin-top:6px">
     ${strengthLine(s.fitbit?.strength)}
-    <div class="fbrow"><button data-act="fitbit">⌚ Підтягнути з Fitbit</button><span class="fbst mut small">${s.fitbit ? 'Оновлено ' + new Date(s.fitbit.at).toLocaleTimeString('uk-UA', {hour: '2-digit', minute: '2-digit'}) : ''}</span></div></div>`;
+    <div class="fbrow"><button data-act="fitbit">${ic('watch', '⌚')}Підтягнути з Fitbit</button><span class="fbst mut small">${s.fitbit ? 'Оновлено ' + new Date(s.fitbit.at).toLocaleTimeString('uk-UA', {hour: '2-digit', minute: '2-digit'}) : ''}</span></div></div>`;
 }
 function sessionEditor(s, live) {
   return s.exercises.map((e, i) => exCard(e, i, s, live)).join('') +
-    `<div class="card"><div class="row" style="flex-wrap:nowrap"><input id="newExName" placeholder="Додати вправу в це тренування"><button data-act="addEx">+</button></div></div>` +
+    `<div class="card"><div class="row" style="flex-wrap:nowrap"><input id="newExName" placeholder="Додати вправу в це тренування"><button class="icon primary" data-act="addEx" aria-label="Додати вправу" style="min-height:56px;width:56px;border-radius:16px">${ic('add', '+')}</button></div></div>` +
     cardioCard(s);
 }
 
@@ -288,10 +291,10 @@ function sessionEditor(s, live) {
 function vWorkout() {
   const s = S.active;
   if (s) {
-    return `<div class="row between"><h2>${esc(s.dayName)}</h2><span class="mut">${fmtDateLong(s.start)}</span></div>
+    return `<div class="sess-head"><h2>${esc(s.dayName)}</h2><span class="mut">${fmtDateLong(s.start)}</span></div>
       <div id="sess">${sessionEditor(s, true)}</div>
-      <button class="primary big" data-act="finish">Завершити тренування</button>
-      <div style="height:8px"></div><button class="big danger" data-act="cancel">Скасувати без збереження</button>`;
+      <button class="fab inline big" data-act="finish">${ic('flag', '🏁')}Завершити тренування</button>
+      <div style="height:8px"></div><button class="big danger" data-act="cancel">${ic('close')}Скасувати без збереження</button>`;
   }
   ui.day ||= todayDay();
   const d = dayById(ui.day) || S.program[0];
@@ -299,25 +302,25 @@ function vWorkout() {
   return `<div class="days">${S.program.map(x => `<button class="${x.id === d.id ? 'on' : ''}" data-act="pickDay" data-id="${x.id}">${esc(x.short)}</button>`).join('')}</div>
     <h2>${esc(d.short)} · ${esc(d.name)}</h2>
     <div class="card">${d.exercises.map(ex => { const l = lastFor(ex);
-      return `<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line)"><span>${esc(ex.name)}</span><span class="tgt">${ex.sets}×${esc(ex.reps)}${l ? ' · ' + esc(setStr(l.sets[0], ex.type)) : ''}</span></div>`; }).join('')}
+      return `<div class="preview-row"><span>${esc(ex.name)}</span><span class="tgt">${ex.sets}×${esc(ex.reps)}${l ? ' · ' + esc(setStr(l.sets[0], ex.type)) : ''}</span></div>`; }).join('')}
       ${d.cardio ? `<div class="tgt" style="margin-top:8px">Кардіо: ${esc(d.cardio)}</div>` : ''}</div>
-    <button class="primary big" data-act="start">▶ Почати тренування</button>`;
+    <button class="fab" data-act="start">${ic('play_arrow', '▶')}Почати тренування</button>`;
 }
 function vHistory() {
   if (ui.view) {
     const s = S.sessions.find(x => x.id === ui.view);
-    if (s) return `<button data-act="back">← Назад</button>
+    if (s) return `<button class="text" data-act="back" style="margin-top:8px;margin-left:-8px">${ic('arrow_back', '←')}Назад</button>
       <h2>${esc(s.dayName)}</h2><div class="mut">${fmtDateLong(s.start)} · ${fmtDur(s.duration || 0)} · ${(sessionVolume(s) / 1000).toFixed(2)} т</div>
-      <div class="card row" style="margin-top:8px;flex-wrap:nowrap"><label class="mut small" style="white-space:nowrap">Тривалість, хв</label>
+      <div class="card row" style="margin-top:12px;flex-wrap:nowrap"><label style="white-space:nowrap">Тривалість, хв</label>
         <input type="number" data-act-input="dur" value="${Math.round((s.duration || 0) / 60)}"></div>
       <div id="sess">${sessionEditor(s, false)}</div>
-      <button class="big danger" data-act="delSession">Видалити тренування</button>`;
+      <button class="big danger" data-act="delSession">${ic('delete')}Видалити тренування</button>`;
     ui.view = null;
   }
   if (!S.sessions.length) return '<h2>Історія</h2><p class="mut">Тут з’являться завершені тренування.</p>';
   return '<h2>Історія</h2>' + S.sessions.slice().reverse().map(s => {
     const sets = s.exercises.reduce((a, e) => a + e.sets.filter(t => t.done).length, 0);
-    return `<button class="list-item" data-act="open" data-id="${s.id}"><div class="row between"><b>${esc(s.dayName)}</b><span class="mut">${fmtDate(s.start)}</span></div>
+    return `<button class="list-item" data-act="open" data-id="${s.id}"><div class="row between" style="flex-wrap:nowrap"><b>${esc(s.dayName)}</b><span class="mut" style="white-space:nowrap">${fmtDate(s.start)}</span></div>
       <div class="mut">${fmtDur(s.duration || 0)} · ${sets} підх. · ${(sessionVolume(s) / 1000).toFixed(2)} т${s.cardio && s.cardio.min ? ' · кардіо ' + s.cardio.min + ' хв' : ''}</div>${fbSummary(s) ? `<div class="mut small">${esc(fbSummary(s))}</div>` : ''}</button>`;
   }).join('');
 }
@@ -342,9 +345,9 @@ function lineChart(pts) {
   const x = i => P + (pts.length === 1 ? (W - 2 * P) / 2 : i * (W - P - 10) / (pts.length - 1));
   const y = v => H - 20 - (v - lo) / (hi - lo) * (H - 40);
   const line = (k, c) => { const p = pts.map((q, i) => q[k] != null ? [x(i), y(q[k])] : null).filter(Boolean);
-    return `<polyline fill="none" stroke="${c}" stroke-width="2.5" points="${p.map(a => a.join(',')).join(' ')}"/>` + p.map(a => `<circle cx="${a[0]}" cy="${a[1]}" r="3.5" fill="${c}"/>`).join(''); };
+    return `<polyline fill="none" stroke="${c}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" points="${p.map(a => a.join(',')).join(' ')}"/>` + p.map(a => `<circle cx="${a[0]}" cy="${a[1]}" r="4.5" fill="${c}" stroke="var(--sc-low)" stroke-width="2"/>`).join(''); };
   const grid = [lo, (lo + hi) / 2, hi].map(v => `<line x1="${P}" x2="${W - 6}" y1="${y(v)}" y2="${y(v)}" stroke="currentColor" opacity=".12"/><text x="2" y="${y(v) + 3}">${Math.round(v)}</text>`).join('');
-  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Графік прогресу">${grid}${line('rm', 'var(--acc2)')}${line('w', 'var(--acc)')}
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Графік прогресу">${grid}${line('rm', 'var(--tertiary)')}${line('w', 'var(--primary)')}
     <text x="${P}" y="${H - 4}">${fmtDate(pts[0].t)}</text><text x="${W - 6}" y="${H - 4}" text-anchor="end">${fmtDate(pts[pts.length - 1].t)}</text></svg>`;
 }
 function weekStart(t) { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); }
@@ -354,7 +357,7 @@ function weeklyChart() {
   for (const s of S.sessions) { const w = weeks.find(k => k.t === weekStart(s.start)); if (w) { w.v += sessionVolume(s); w.n++; w.c += num(s.cardio?.min) || 0; } }
   const W = 340, H = 150, max = Math.max(1, ...weeks.map(w => w.v)), bw = (W - 10) / 8;
   const bars = weeks.map((w, i) => { const h = w.v / max * (H - 40);
-    return `<rect x="${5 + i * bw + 4}" y="${H - 20 - h}" width="${bw - 8}" height="${h}" rx="4" fill="var(--acc)"/>
+    return `<rect x="${5 + i * bw + 4}" y="${H - 20 - h}" width="${bw - 8}" height="${h}" rx="10" fill="${i === 7 ? 'var(--primary)' : 'var(--primary-container)'}"/>
       <text x="${5 + i * bw + bw / 2}" y="${H - 24 - h}" text-anchor="middle">${w.v ? (w.v / 1000).toFixed(1) : ''}</text>
       <text x="${5 + i * bw + bw / 2}" y="${H - 6}" text-anchor="middle">${new Date(w.t).toLocaleDateString('uk-UA', {day: '2-digit', month: '2-digit'})}</text>`; }).join('');
   const cur = weeks[7];
@@ -371,7 +374,7 @@ function vProgress() {
   html += `<div class="card"><select data-act-input="progEx">${names.map(n => `<option value="${esc(n.toLowerCase())}" ${n.toLowerCase() === ui.progEx ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>`;
   if (pts.length) {
     const bw = pts.reduce((a, p) => p.w > a.w ? p : a), br = pts.filter(p => p.rm != null).reduce((a, p) => !a || p.rm > a.rm ? p : a, null);
-    html += `<div class="legend" style="margin:8px 0"><span><i style="background:var(--acc)"></i>Найкращий підхід, ${TYPES[type].a}</span>${type === 'reps' ? '<span><i style="background:var(--acc2)"></i>Оцінка 1ПМ (Еплі)</span>' : ''}</div>
+    html += `<div class="legend" style="margin:8px 0"><span><i style="background:var(--primary)"></i>Найкращий підхід, ${TYPES[type].a}</span>${type === 'reps' ? '<span><i style="background:var(--tertiary)"></i>Оцінка 1ПМ (Еплі)</span>' : ''}</div>
       ${lineChart(type === 'reps' ? pts : pts.map(p => ({...p, rm: null})))}
       <h3 style="margin-top:10px">Рекорди</h3><table>
       <tr><td>Макс. вага</td><td><b>${bw.w} ${TYPES[type].a}</b> × ${bw.r ?? '–'}</td><td class="mut">${fmtDate(bw.t)}</td></tr>
@@ -393,7 +396,7 @@ function vRecords() {
 function vProgram() {
   ui.editDay ||= S.program[0]?.id;
   const d = dayById(ui.editDay);
-  let h = `<h2>Програма</h2><div class="days">${S.program.map(x => `<button class="${d && x.id === d.id ? 'on' : ''}" data-act="editDay" data-id="${x.id}">${esc(x.short)}</button>`).join('')}<button data-act="addDay">+ день</button></div>`;
+  let h = `<h2>Програма</h2><div class="days">${S.program.map(x => `<button class="${d && x.id === d.id ? 'on' : ''}" data-act="editDay" data-id="${x.id}">${esc(x.short)}</button>`).join('')}<button data-act="addDay">${ic('add', '+')}день</button></div>`;
   if (d) h += `<div class="card" data-day="${d.id}">
     <div class="pe" style="border:0;margin:0;padding:0"><div class="g" style="grid-template-columns:70px 1fr 90px">
       <div><label>Коротко</label><input data-d="short" value="${esc(d.short)}"></div>
@@ -402,21 +405,22 @@ function vProgram() {
       <div><label>Кардіо (ціль)</label><input data-d="cardio" value="${esc(d.cardio)}"></div></div>
     ${d.exercises.map((ex, i) => `<div class="pe" data-xi="${i}">
       <div class="row" style="flex-wrap:nowrap"><input data-x="name" value="${esc(ex.name)}">
-        <button class="icon" data-act="exUp" aria-label="Вгору">↑</button><button class="icon danger" data-act="exDel" aria-label="Видалити">✕</button></div>
+        <button class="icon" data-act="exUp" aria-label="Вгору">${ic('arrow_upward', '↑')}</button><button class="icon danger" data-act="exDel" aria-label="Видалити">${ic('close', '✕')}</button></div>
       <div class="g" style="grid-template-columns:1fr 1fr 1fr 1.4fr"><div><label>Підходи</label><input type="number" data-x="sets" value="${ex.sets}"></div>
         <div><label>Повтори</label><input data-x="reps" value="${esc(ex.reps)}"></div>
         <div><label>Відпоч., с</label><input type="number" data-x="rest" value="${ex.rest}"></div>
         <div><label>Тип</label><select data-x="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${ex.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div></div></div>`).join('')}
-    <div class="row" style="margin-top:10px"><button data-act="exAdd">+ вправа</button><button class="danger" data-act="dayDel">Видалити день</button></div></div>`;
-  return h + `<h2>Резервна копія</h2><div class="card"><div class="row"><button data-act="export">⬇ Експорт JSON</button><button data-act="import">⬆ Імпорт JSON</button></div>
+    <div class="row" style="margin-top:10px"><button data-act="exAdd">${ic('add', '+')}вправа</button><button class="danger" data-act="dayDel">${ic('delete')}Видалити день</button></div></div>`;
+  return h + `<h2>Резервна копія</h2><div class="card"><div class="row"><button data-act="export">${ic('download', '⬇')}Експорт JSON</button><button class="outlined" data-act="import">${ic('upload', '⬆')}Імпорт JSON</button></div>
     <p class="mut small">Дані зберігаються лише в цьому браузері. Робіть експорт час від часу.</p>
-    <button class="danger" data-act="resetProg">Відновити стандартну програму</button></div>`;
+    <button class="danger" data-act="resetProg" style="padding-left:8px">${ic('restart_alt')}Відновити стандартну програму</button></div>`;
 }
 
 function render() {
   const y = scrollY;
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === ui.tab));
-  $('#view').innerHTML = ({workout: vWorkout, history: vHistory, progress: vProgress, program: vProgram})[ui.tab]();
+  const v = $('#view'); v.innerHTML = ({workout: vWorkout, history: vHistory, progress: vProgress, program: vProgram})[ui.tab]();
+  if (!ui.keepScroll) { v.classList.remove('enter'); void v.offsetWidth; v.classList.add('enter'); }
   scrollTo(0, ui.keepScroll ? y : 0); ui.keepScroll = false;
   tick();
   if (document.querySelector('[data-act=fitbit]') && navigator.onLine !== false) loadGis().catch(() => {});
@@ -457,7 +461,7 @@ document.addEventListener('click', ev => {
       finishSession();
     },
     cancel() { if (confirm('Скасувати тренування? Дані цієї сесії буде втрачено.')) { S.active = null; S.rest = null; save(); render(); } },
-    restAdd() { if (S.rest) { S.rest.endAt = Math.max(Date.now(), S.rest.endAt) + (+b.dataset.v) * 1000; restAlerted = false; save(); tick(); } },
+    restAdd() { if (S.rest) { S.rest.endAt = Math.max(Date.now(), S.rest.endAt) + (+b.dataset.v) * 1000; S.rest.dur = Math.max(S.rest.dur || 0, (S.rest.endAt - Date.now()) / 1000); restAlerted = false; save(); tick(); } },
     restSkip() { S.rest = null; save(); tick(); },
     open() { ui.view = b.dataset.id; render(); },
     back() { ui.view = null; render(); },
@@ -510,10 +514,22 @@ $('#importFile').addEventListener('change', async ev => {
     if (!Array.isArray(d.program) || !Array.isArray(d.sessions)) throw new Error('format');
     if (!confirm(`Імпортувати ${d.sessions.length} тренувань і програму з ${d.program.length} днів? Поточні дані буде замінено.`)) return;
     S.program = d.program; S.sessions = d.sessions.sort((a, b) => a.start - b.start); save(); ui = {tab: 'history'}; render();
-    alert('Імпорт виконано');
-  } catch (e) { alert('Не вдалося прочитати файл: це не резервна копія Спортіка.'); }
+    toast('Імпорт виконано');
+  } catch (e) { toast('Не вдалося прочитати файл: це не резервна копія Спортіка.', true); }
   ev.target.value = '';
 });
+
+// ---------- Material: іконки, app bar, ripple ----------
+if (document.fonts && document.fonts.load) document.fonts.load('24px "Material Symbols Rounded"', 'home')
+  .then(f => { if (f && f.length) document.documentElement.classList.add('msok'); }).catch(() => {});
+addEventListener('scroll', () => $('#top').classList.toggle('scrolled', scrollY > 4), {passive: true});
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+document.addEventListener('pointerdown', ev => {
+  const b = ev.target.closest('button'); if (!b || reduceMotion.matches || b.closest('#tabs')) return;
+  const r = b.getBoundingClientRect(), d = Math.max(r.width, r.height) * 2.2, sp = document.createElement('span');
+  sp.className = 'ripple'; sp.style.cssText = `width:${d}px;height:${d}px;left:${ev.clientX - r.left - d / 2}px;top:${ev.clientY - r.top - d / 2}px`;
+  b.appendChild(sp); setTimeout(() => sp.remove(), 600);
+}, {passive: true});
 
 render(); awakeBtn(); lockWake();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('service-worker.js').catch(() => {});
