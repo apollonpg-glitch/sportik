@@ -20,7 +20,11 @@
     try { r = await fetchFn(url, {headers: {Authorization: 'Bearer ' + token}}); }
     catch (e) { throw new FitbitError('network'); }
     if (r.status === 401) throw new FitbitError('expired');
-    if (r.status === 403) throw new FitbitError('forbidden');
+    if (r.status === 403) {
+      let why = '';
+      try { const j = await r.json(), e = j.error || {}; why = ((e.details || []).find(d => d.reason) || {}).reason || e.status || ''; why = [why, e.message].filter(Boolean).join(': '); } catch (e) {}
+      throw new FitbitError('forbidden', why);
+    }
     if (!r.ok) throw new FitbitError('http', 'HTTP ' + r.status);
     return r.json();
   }

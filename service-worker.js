@@ -1,4 +1,4 @@
-const CACHE = 'sportik-v7';
+const CACHE = 'sportik-v7b';
 const ASSETS = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'awake.mp4', 'fitbit.js', 'drive.js', 'auth.js'];
 const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 self.addEventListener('install', e => {

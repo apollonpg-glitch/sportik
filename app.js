@@ -302,7 +302,7 @@ async function fbRun(s, opt = {}) {
     if (code === 'none' && s.end && Date.now() - s.end >= FB_WINDOW) { s.fitbitPending = false; save(); }
     if (!opt.auto) {
       say('');
-      toast(FB_ERR[code] || 'Не вдалося отримати дані з Fitbit' + (e && e.message ? ` (${e.message})` : '') + '. Спробуй ще раз.', code !== 'none');
+      toast((FB_ERR[code] ? FB_ERR[code] + (code === 'forbidden' && e.message && e.message !== code ? ` Причина від Google: ${e.message}` : '') : '') || 'Не вдалося отримати дані з Fitbit' + (e && e.message ? ` (${e.message})` : '') + '. Спробуй ще раз.', code !== 'none');
     }
     if (ui.tab === 'history') rerender();
     return code === 'none' ? 'none' : 'error';
